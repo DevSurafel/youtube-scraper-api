@@ -229,7 +229,7 @@ def scrape_twitter(username):
     return {"success": False, "error": f"@{username} not found or temporarily unavailable"}
 
 
-# ==================== INSTAGRAM – NEW ====================
+# ==================== INSTAGRAM – IMPROVED ====================
 def extract_ig(url_or_at):
     m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", url_or_at)
     if m: return m.group(1)
@@ -244,91 +244,255 @@ def scrape_instagram(username):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
+        "Referer": "https://www.instagram.com/",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
     }
 
-    try:
-        r = requests.get(f"https://www.instagram.com/{username}/", headers=headers, timeout=15)
-        if r.status_code != 200:
-            raise ValueError()
+    # Try multiple approaches
+    methods_tried = []
 
-        # ---- 1. Try the public JSON payload (still works for public accounts) ----
-        data_match = re.search(r'window\.__additionalDataLoaded\([\'"][^\'"]+[\'"],(\{.*?\})\);', r.text)
-        if data_match:
-            payload = json.loads(data_match.group(1))
-            user = payload.get("graphql", {}).get("user", {})
-            if user:
-                stats = user.get("edge_followed_by", {}).get("count")
-                following = user.get("edge_follow", {}).get("count")
-                posts = user.get("edge_owner_to_timeline_media", {}).get("count")
-                full_name = user.get("full_name") or username
-                bio = user.get("biography") or ""
-                avatar = user.get("profile_pic_url_hd") or f"https://unavatar.io/instagram/{username}"
+    # ---- Method 1: Direct Instagram with embedded JSON ----
+    try:
+        methods_tried.append("instagram_direct")
+        r = requests.get(f"https://www.instagram.com/{username}/", headers=headers, timeout=20)
+        
+        if r.status_code == 200 and "login" not in r.url.lower():
+            # Look for shared_data JSON
+            shared_data_match = re.search(r'window\._sharedData\s*=\s*(\{.+?\});', r.text)
+            if shared_data_match:
+                shared_data = json.loads(shared_data_match.group(1))
+                user = shared_data.get("entry_data", {}).get("ProfilePage", [{}])[0].get("graphql", {}).get("user", {})
+                
+                if user:
+                    followers = user.get("edge_followed_by", {}).get("count", 0)
+                    following = user.get("edge_follow", {}).get("count", 0)
+                    posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
+                    full_name = user.get("full_name") or username
+                    bio = user.get("biography") or ""
+                    avatar = user.get("profile_pic_url_hd") or user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}"
+                    
+                    return {
+                        "success": True,
+                        "platform": "instagram",
+                        "username": username,
+                        "name": full_name,
+                        "follower_count": format_count(followers, "followers"),
+                        "follower_count_exact": str(followers),
+                        "following_count": format_count(following, "following"),
+                        "post_count": format_count(posts, "posts"),
+                        "profile_url": f"https://instagram.com/{username}",
+                        "profile_image": avatar,
+                        "bio": bio[:250],
+                        "method": "instagram_shared_data",
+                    }
+            
+            # Look for __additionalDataLoaded JSON
+            additional_match = re.search(r'window\.__additionalDataLoaded\([\'"][^\'"]+[\'"],(\{.*?\})\);', r.text)
+            if additional_match:
+                payload = json.loads(additional_match.group(1))
+                user = payload.get("graphql", {}).get("user", {})
+                
+                if user:
+                    followers = user.get("edge_followed_by", {}).get("count", 0)
+                    following = user.get("edge_follow", {}).get("count", 0)
+                    posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
+                    full_name = user.get("full_name") or username
+                    bio = user.get("biography") or ""
+                    avatar = user.get("profile_pic_url_hd") or user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}"
+                    
+                    return {
+                        "success": True,
+                        "platform": "instagram",
+                        "username": username,
+                        "name": full_name,
+                        "follower_count": format_count(followers, "followers"),
+                        "follower_count_exact": str(followers),
+                        "following_count": format_count(following, "following"),
+                        "post_count": format_count(posts, "posts"),
+                        "profile_url": f"https://instagram.com/{username}",
+                        "profile_image": avatar,
+                        "bio": bio[:250],
+                        "method": "instagram_additional_data",
+                    }
+            
+            # Try meta tags fallback
+            soup = BeautifulSoup(r.text, "html.parser")
+            meta = soup.find("meta", property="og:description") or soup.find("meta", {"name": "description"})
+            
+            if meta:
+                txt = meta.get("content", "")
+                
+                # Parse name
+                name_match = re.search(r"^([^-(]+)", txt)
+                name = name_match.group(1).strip() if name_match else username
+                
+                # Parse stats
+                followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", txt, re.I)
+                following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", txt, re.I)
+                posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", txt, re.I)
+                
+                # Parse bio
+                bio = ""
+                bio_match = re.search(r"-\s*(.+?)(?:\s*See Instagram photos|$)", txt)
+                if bio_match:
+                    bio = bio_match.group(1).strip()[:250]
+                
+                if followers_match or following_match or posts_match or name != username:
+                    return {
+                        "success": True,
+                        "platform": "instagram",
+                        "username": username,
+                        "name": name,
+                        "follower_count": format_count(parse_count(followers_match.group(1)), "followers") if followers_match else "Hidden",
+                        "follower_count_exact": str(parse_count(followers_match.group(1))) if followers_match else "0",
+                        "following_count": format_count(parse_count(following_match.group(1)), "following") if following_match else "Hidden",
+                        "post_count": format_count(parse_count(posts_match.group(1)), "posts") if posts_match else "Hidden",
+                        "profile_url": f"https://instagram.com/{username}",
+                        "profile_image": f"https://unavatar.io/instagram/{username}",
+                        "bio": bio,
+                        "method": "instagram_meta",
+                    }
+    except Exception as e:
+        print(f"Instagram direct method failed for {username}: {e}")
+
+    # ---- Method 2: Picuki (Instagram viewer) ----
+    try:
+        methods_tried.append("picuki")
+        r = requests.get(f"https://www.picuki.com/profile/{username}", headers=headers, timeout=15)
+        
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            # Get name
+            name_elem = soup.find("h1", class_="profile-name-top")
+            name = name_elem.get_text(strip=True) if name_elem else username
+            
+            # Get stats
+            stats_div = soup.find("div", class_="profile-stats")
+            followers = following = posts = "Hidden"
+            
+            if stats_div:
+                stat_items = stats_div.find_all("li")
+                for item in stat_items:
+                    value = item.find("span", class_="profile-stat-count")
+                    label = item.find("span", class_="profile-stat-name")
+                    if value and label:
+                        v = value.get_text(strip=True)
+                        l = label.get_text(strip=True).lower()
+                        if "post" in l:
+                            posts = format_count(parse_count(v), "posts")
+                        elif "follower" in l:
+                            followers = format_count(parse_count(v), "followers")
+                        elif "following" in l:
+                            following = format_count(parse_count(v), "following")
+            
+            # Get bio
+            bio_elem = soup.find("div", class_="profile-description")
+            bio = bio_elem.get_text(strip=True)[:250] if bio_elem else ""
+            
+            if followers != "Hidden" or following != "Hidden" or posts != "Hidden":
                 return {
                     "success": True,
                     "platform": "instagram",
                     "username": username,
-                    "name": full_name,
-                    "follower_count": format_count(stats, "followers") if stats else "Hidden",
-                    "follower_count_exact": str(stats) if stats else "0",
-                    "following_count": format_count(following, "following") if following else "Hidden",
-                    "post_count": format_count(posts, "posts") if posts else "Hidden",
+                    "name": name,
+                    "follower_count": followers,
+                    "follower_count_exact": str(parse_count(followers)) if followers != "Hidden" else "0",
+                    "following_count": following,
+                    "post_count": posts,
                     "profile_url": f"https://instagram.com/{username}",
-                    "profile_image": avatar,
-                    "bio": bio[:250],
-                    "method": "instagram_json",
+                    "profile_image": f"https://unavatar.io/instagram/{username}",
+                    "bio": bio,
+                    "method": "picuki",
                 }
-
-        # ---- 2. Fallback to meta description (sometimes still present) ----
-        soup = BeautifulSoup(r.text, "html.parser")
-        meta = soup.find("meta", property="og:description") or soup.find("meta", {"name": "description"})
-        if meta:
-            txt = meta.get("content", "")
-            name = re.search(r"^([^-(]+)", txt).group(1).strip() if re.search(r"^([^-(]+)", txt) else username
-            followers = re.search(r"([\d,.]+[KMB]?) Followers", txt, re.I)
-            following = re.search(r"([\d,.]+[KMB]?) Following", txt, re.I)
-            posts = re.search(r"([\d,.]+[KMB]?) Posts", txt, re.I)
-            bio_match = re.search(r"-\s*(.+?)(?:\s*See Instagram|$)", txt)
-            bio = bio_match.group(1).strip()[:250] if bio_match else ""
-
-            return {
-                "success": True,
-                "platform": "instagram",
-                "username": username,
-                "name": name,
-                "follower_count": format_count(parse_count(followers.group(1)), "followers") if followers else "Hidden",
-                "following_count": format_count(parse_count(following.group(1)), "following") if following else "Hidden",
-                "post_count": format_count(parse_count(posts.group(1)), "posts") if posts else "Hidden",
-                "profile_url": f"https://instagram.com/{username}",
-                "profile_image": f"https://unavatar.io/instagram/{username}",
-                "bio": bio,
-                "method": "instagram_meta",
-            }
-
     except Exception as e:
-        print(f"Instagram scrape error for {username}: {e}")
+        print(f"Picuki method failed for {username}: {e}")
 
-    # ---- 3. Unavatar existence check (profile exists but stats hidden) ----
+    # ---- Method 3: Dumpor (Instagram viewer) ----
     try:
+        methods_tried.append("dumpor")
+        r = requests.get(f"https://dumpor.com/v/{username}", headers=headers, timeout=15)
+        
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            name_elem = soup.find("div", class_="user__title")
+            name = name_elem.get_text(strip=True) if name_elem else username
+            
+            # Stats
+            stats = soup.find_all("div", class_="user__info-stats")
+            followers = following = posts = "Hidden"
+            
+            for stat in stats:
+                text = stat.get_text(strip=True)
+                if "followers" in text.lower():
+                    num = re.search(r"([\d,.]+[KMB]?)", text)
+                    if num:
+                        followers = format_count(parse_count(num.group(1)), "followers")
+                elif "following" in text.lower():
+                    num = re.search(r"([\d,.]+[KMB]?)", text)
+                    if num:
+                        following = format_count(parse_count(num.group(1)), "following")
+                elif "posts" in text.lower() or "post" in text.lower():
+                    num = re.search(r"([\d,.]+[KMB]?)", text)
+                    if num:
+                        posts = format_count(parse_count(num.group(1)), "posts")
+            
+            bio_elem = soup.find("div", class_="user__info-desc")
+            bio = bio_elem.get_text(strip=True)[:250] if bio_elem else ""
+            
+            if followers != "Hidden" or following != "Hidden" or posts != "Hidden":
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": name,
+                    "follower_count": followers,
+                    "follower_count_exact": str(parse_count(followers)) if followers != "Hidden" else "0",
+                    "following_count": following,
+                    "post_count": posts,
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": f"https://unavatar.io/instagram/{username}",
+                    "bio": bio,
+                    "method": "dumpor",
+                }
+    except Exception as e:
+        print(f"Dumpor method failed for {username}: {e}")
+
+    # ---- Method 4: Unavatar existence check ----
+    try:
+        methods_tried.append("unavatar")
         if requests.head(f"https://unavatar.io/instagram/{username}", timeout=5).status_code == 200:
             return {
                 "success": True,
                 "platform": "instagram",
                 "username": username,
-                "name": username.title(),
+                "name": username.replace("_", " ").replace(".", " ").title(),
                 "follower_count": "Hidden",
+                "follower_count_exact": "0",
                 "following_count": "Hidden",
                 "post_count": "Hidden",
                 "profile_url": f"https://instagram.com/{username}",
                 "profile_image": f"https://unavatar.io/instagram/{username}",
-                "bio": "Profile exists – stats require login",
+                "bio": "Profile exists but requires login to view stats. Instagram has restricted public access.",
                 "method": "unavatar",
+                "note": "Due to Instagram's privacy changes, stats may not be available without authentication."
             }
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Unavatar check failed for {username}: {e}")
 
-    return {"success": False, "error": f"@{username} not found or is private"}
+    return {
+        "success": False, 
+        "error": f"@{username} not found or is private. Instagram has restricted public data access.",
+        "methods_tried": methods_tried
+    }
 
 
 # ==================== TIKTOK (unchanged) ====================
@@ -455,7 +619,7 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK – RE-WRITTEN ====================
+# ==================== FACEBOOK (unchanged) ====================
 def extract_fb(url_or_at):
     url_lower = url_or_at.lower()
     # groups with numeric ID
@@ -537,7 +701,7 @@ def scrape_facebook(identifier, entity_type="page"):
             meta = soup.find("meta", {"property": "og:description"}) or soup.find("meta", {"name": "description"})
             if meta:
                 bio = meta.get("content", "")
-                bio = re.sub(r"^\S+?\s*[·|]\s*", "", bio)          # remove leading name
+                bio = re.sub(r"^\S+?\s*[·|]\s*", "", bio)
                 bio = re.sub(r"\s*Log In.*", "", bio, flags=re.I)
                 bio = re.sub(r"\s*See more.*", "", bio, flags=re.I)
                 bio = re.sub(r"\s*\d+\s*(?:members?|followers?|likes?).*", "", bio, flags=re.I)
@@ -702,7 +866,7 @@ def universal_scrape():
     return jsonify({"success": False, "error": "Unsupported platform or invalid URL"}), 400
 
 
-# Platform-specific endpoints (unchanged)
+# Platform-specific endpoints
 @app.route("/api/youtube", methods=["POST"])
 def youtube_endpoint():
     url = (request.get_json() or {}).get("url", "")
@@ -759,13 +923,13 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "12.0",
+        "version": "12.1",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
             "/api/twitter": "POST – Twitter/X",
-            "/api/instagram": "POST – Instagram",
+            "/api/instagram": "POST – Instagram (improved)",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram",
             "/api/facebook": "POST – Facebook (Pages & Groups)",
