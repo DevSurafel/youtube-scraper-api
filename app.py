@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py  –  Social-Media Stats API (Flask + Telethon)
+# app.py  –  Social-Media Stats API (Flask + Telethon + FB Groups)
 # --------------------------------------------------------------
 
 import os
@@ -24,7 +24,7 @@ try:
         ChannelPrivateError,
     )
     TELEGRAM_AVAILABLE = True
-except Exception as e:          # ImportError or any runtime issue
+except Exception as e:
     print("Warning: Telethon not available → Telegram will be limited:", e)
     TELEGRAM_AVAILABLE = False
 
@@ -40,7 +40,6 @@ TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 # ------------------------------------------------
 
 def async_route(f):
-    """Run an async view with asyncio.run() – safe for Flask."""
     @wraps(f)
     def wrapper(*a, **kw):
         return asyncio.run(f(*a, **kw))
@@ -146,7 +145,6 @@ def scrape_twitter(username):
         )
     }
 
-    # ---- Nitter loop ----
     for base in NITTER_INSTANCES:
         try:
             r = requests.get(f"{base}/{username}", headers=headers, timeout=15)
@@ -199,7 +197,7 @@ def scrape_twitter(username):
         except Exception:
             continue
 
-    # ---- Syndication fallback ----
+    # Syndication fallback
     try:
         r = requests.get(
             f"https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={username}",
@@ -224,7 +222,7 @@ def scrape_twitter(username):
     except Exception:
         pass
 
-    # ---- Unavatar existence ----
+    # Unavatar fallback
     try:
         if requests.head(f"https://unavatar.io/twitter/{username}", timeout=5).status_code == 200:
             return {
@@ -288,7 +286,6 @@ def scrape_tiktok(username):
             "method": "tiktok_web",
         }
     except Exception:
-        # fallback
         try:
             if requests.head(f"https://unavatar.io/tiktok/{username}", timeout=5).status_code == 200:
                 return {
@@ -325,13 +322,12 @@ async def _tg_async(username):
         int(TELEGRAM_API_ID),
         TELEGRAM_API_HASH,
     )
-    await client.start()          # validates session automatically
+    await client.start()
 
     try:
         entity = await client.get_entity(username)
         avatar = f"https://unavatar.io/telegram/{username}"
 
-        # ---- Channel / Supergroup ----
         if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
             full = await client(GetFullChannelRequest(entity))
             typ = ("Channel" if entity.broadcast else
@@ -351,7 +347,6 @@ async def _tg_async(username):
                 "method": "telethon",
             }
 
-        # ---- Normal user ----
         full = await client(GetFullUserRequest(entity))
         name = f"{entity.first_name or ''} {entity.last_name or ''}".strip() or username
         return {
@@ -384,50 +379,90 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK (basic) ====================
+# ==================== FACEBOOK (Groups + Pages) ====================
 def extract_fb(url_or_at):
-    m = re.search(r"(?:facebook\.com|fb\.com)/([A-Za-z0-9.]+)", url_or_at)
-    if m and m.group(1).lower() not in {"profile.php", "watch", "groups", "pages", "marketplace"}:
-        return m.group(1)
-    m = re.search(r"^@?([A-Za-z0-9.]+)$", url_or_at)
-    if m: return m.group(1)
+    """Extract identifier from any Facebook URL (profile, page, group)"""
+    patterns = [
+        r"(?:facebook\.com|fb\.com)/groups/([A-Za-z0-9.\-_]+)",
+        r"(?:facebook\.com|fb\.com)/([A-Za-z0-9.\-_]+)",
+        r"^@?([A-Za-z0-9.\-_]+)$"
+    ]
+    for pat in patterns:
+        m = re.search(pat, url_or_at)
+        if m:
+            ident = m.group(1)
+            if ident.lower() not in {"profile.php", "watch", "marketplace"}:
+                return ident
     return None
 
 
 def scrape_facebook(identifier):
+    """Scrape Facebook Page or Group (public only)"""
+    url = f"https://www.facebook.com/{identifier}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
     try:
-        r = requests.get(
-            f"https://www.facebook.com/{identifier}",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=12,
-        )
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "lxml")
-            title = soup.find("title")
-            name = (title.get_text(strip=True) if title else identifier)
-            name = re.sub(r"\s*[-|]\s*Facebook$", "", name).strip()
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            raise ValueError("Not accessible")
 
-            followers = "Hidden"
-            m = re.search(r"([\d,]+)\s+(?:followers|likes|members)", r.text, re.I)
+        soup = BeautifulSoup(r.text, "lxml")
+        text = r.text
+
+        # Extract title
+        title_tag = soup.find("title")
+        raw_title = title_tag.get_text(strip=True) if title_tag else ""
+        name = re.sub(r"\s*[-|·]\s*Facebook$", "", raw_title).strip()
+
+        # Detect if it's a group
+        is_group = "/groups/" in url or bool(re.search(r"member", text, re.I))
+
+        # Extract count
+        count = "Hidden"
+        count_exact = "0"
+
+        if is_group:
+            # Look for "members"
+            m = re.search(r"([\d,]+)\s+members?", text, re.I)
             if m:
-                followers = format_count(m.group(1).replace(",", ""), "followers")
+                count_exact = m.group(1).replace(",", "")
+                count = format_count(count_exact, "members")
+            entity_type = "Group"
+        else:
+            # Look for followers or likes
+            m = re.search(r"([\d,]+)\s+(?:followers|people like this)", text, re.I)
+            if m:
+                count_exact = m.group(1).replace(",", "")
+                count = format_count(count_exact, "followers")
+            entity_type = "Page"
 
-            return {
-                "success": True,
-                "platform": "facebook",
-                "username": identifier,
-                "name": name,
-                "follower_count": followers,
-                "profile_url": f"https://www.facebook.com/{identifier}",
-                "profile_image": f"https://unavatar.io/facebook/{identifier}",
-                "bio": "Facebook scraping limited (login required)",
-                "method": "basic",
-                "note": "Detailed stats need authentication.",
-            }
-    except Exception:
-        pass
+        # Profile image via unavatar or meta tag
+        img_url = f"https://unavatar.io/facebook/{identifier}"
+        meta_img = soup.find("meta", property="og:image")
+        if meta_img and meta_img.get("content"):
+            img_url = meta_img["content"]
 
-    # unavatar fallback
+        return {
+            "success": True,
+            "platform": "facebook",
+            "username": identifier,
+            "name": name or identifier,
+            "type": entity_type,
+            "follower_count": count,
+            "follower_count_exact": count_exact,
+            "profile_url": url,
+            "profile_image": img_url,
+            "bio": "Facebook scraping is limited. Login required for full details.",
+            "method": "basic_scrape",
+            "note": "Public groups and pages only."
+        }
+
+    except Exception as e:
+        print(f"FB scrape failed for {identifier}: {e}")
+
+    # Fallback: confirm existence
     try:
         if requests.head(f"https://unavatar.io/facebook/{identifier}", timeout=5).status_code == 200:
             return {
@@ -435,6 +470,7 @@ def scrape_facebook(identifier):
                 "platform": "facebook",
                 "username": identifier,
                 "name": identifier,
+                "type": "Unknown",
                 "follower_count": "Hidden",
                 "profile_url": f"https://www.facebook.com/{identifier}",
                 "profile_image": f"https://unavatar.io/facebook/{identifier}",
@@ -444,13 +480,12 @@ def scrape_facebook(identifier):
     except Exception:
         pass
 
-    return {"success": False, "error": f"Cannot read Facebook profile {identifier}"}
+    return {"success": False, "error": f"Cannot access Facebook: {identifier}"}
 
 
 # ==================== ROUTES ====================
 @app.route("/", methods=["GET"])
 def index():
-    """Serve the beautiful HTML UI."""
     return send_from_directory(app.static_folder, "index.html")
 
 
@@ -461,7 +496,7 @@ def universal_scrape():
     if not url:
         return jsonify({"success": False, "error": "Missing url"}), 400
 
-    # ---- YouTube ----
+    # YouTube
     if "youtube.com" in url or "youtu.be" in url:
         if not YOUTUBE_API_KEY:
             return jsonify({"success": False, "error": "YouTube API key missing"}), 500
@@ -470,38 +505,37 @@ def universal_scrape():
             return jsonify({"success": False, "error": "Invalid YouTube URL"}), 400
         return jsonify(yt_by_id(cid) if typ == "id" else yt_by_handle(cid))
 
-    # ---- Twitter / X ----
+    # Twitter / X
     if "twitter.com" in url or "x.com" in url or url.startswith("@"):
         user = extract_tw(url)
         if not user:
             return jsonify({"success": False, "error": "Invalid Twitter handle"}), 400
         return jsonify(scrape_twitter(user))
 
-    # ---- TikTok ----
+    # TikTok
     if "tiktok.com" in url:
         user = extract_tt(url)
         if not user:
             return jsonify({"success": False, "error": "Invalid TikTok handle"}), 400
         return jsonify(scrape_tiktok(user))
 
-    # ---- Telegram ----
+    # Telegram
     if "t.me" in url or "telegram.me" in url:
         user = extract_tg(url)
         if not user:
             return jsonify({"success": False, "error": "Invalid Telegram handle"}), 400
         return jsonify(scrape_telegram(user))
 
-    # ---- Facebook ----
+    # Facebook (Page or Group)
     if "facebook.com" in url or "fb.com" in url:
         ident = extract_fb(url)
         if not ident:
             return jsonify({"success": False, "error": "Invalid Facebook URL"}), 400
         return jsonify(scrape_facebook(ident))
 
-    # ---- @handle auto-detect ----
+    # @handle auto-detect
     if url.startswith("@"):
         user = url.lstrip("@")
-        # priority: Twitter → TikTok → Telegram → Facebook
         res = scrape_twitter(user)
         if res["success"]: return jsonify(res)
         res = scrape_tiktok(user)
@@ -514,68 +548,58 @@ def universal_scrape():
     return jsonify({"success": False, "error": "Unsupported platform"}), 400
 
 
-# ---- Dedicated platform endpoints (optional, UI uses /api/scrape) ----
+# Dedicated endpoints
 @app.route("/api/youtube", methods=["POST"])
 def youtube_endpoint():
     url = (request.get_json() or {}).get("url", "")
     cid, typ = extract_yt(url)
-    if not cid:
-        return jsonify({"success": False, "error": "Bad YouTube URL"}), 400
+    if not cid: return jsonify({"success": False, "error": "Bad YouTube URL"}), 400
     return jsonify(yt_by_id(cid) if typ == "id" else yt_by_handle(cid))
-
 
 @app.route("/api/twitter", methods=["POST"])
 def twitter_endpoint():
     url = (request.get_json() or {}).get("url", "")
     user = extract_tw(url)
-    if not user:
-        return jsonify({"success": False, "error": "Bad Twitter handle"}), 400
+    if not user: return jsonify({"success": False, "error": "Bad Twitter handle"}), 400
     return jsonify(scrape_twitter(user))
-
 
 @app.route("/api/tiktok", methods=["POST"])
 def tiktok_endpoint():
     url = (request.get_json() or {}).get("url", "")
     user = extract_tt(url)
-    if not user:
-        return jsonify({"success": False, "error": "Bad TikTok handle"}), 400
+    if not user: return jsonify({"success": False, "error": "Bad TikTok handle"}), 400
     return jsonify(scrape_tiktok(user))
-
 
 @app.route("/api/telegram", methods=["POST"])
 def telegram_endpoint():
     url = (request.get_json() or {}).get("url", "")
     user = extract_tg(url)
-    if not user:
-        return jsonify({"success": False, "error": "Bad Telegram handle"}), 400
+    if not user: return jsonify({"success": False, "error": "Bad Telegram handle"}), 400
     return jsonify(scrape_telegram(user))
-
 
 @app.route("/api/facebook", methods=["POST"])
 def facebook_endpoint():
     url = (request.get_json() or {}).get("url", "")
     ident = extract_fb(url)
-    if not ident:
-        return jsonify({"success": False, "error": "Bad Facebook URL"}), 400
+    if not ident: return jsonify({"success": False, "error": "Bad Facebook URL"}), 400
     return jsonify(scrape_facebook(ident))
 
 
-# ---- Health & Info ----
+# Health & Info
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
         "youtube": bool(YOUTUBE_API_KEY),
         "telegram": TELEGRAM_AVAILABLE and bool(TELEGRAM_SESSION_STRING),
-        "supported": ["YouTube", "Twitter/X", "TikTok", "Telegram", "Facebook (basic)"],
+        "supported": ["YouTube", "Twitter/X", "TikTok", "Telegram", "Facebook (Pages & Groups)"],
     })
-
 
 @app.route("/api/info", methods=["GET"])
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "9.0",
+        "version": "9.1",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
@@ -583,7 +607,7 @@ def info():
             "/api/twitter": "POST – Twitter/X",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram",
-            "/api/facebook": "POST – Facebook (basic)",
+            "/api/facebook": "POST – Facebook (Pages & Groups)",
             "/api/health": "GET – health check",
         },
     })
@@ -591,5 +615,4 @@ def info():
 
 # --------------------------------------------------------------
 if __name__ == "__main__":
-    # Development only – use gunicorn in production
     app.run(host="0.0.0.0", port=5001, debug=True)
