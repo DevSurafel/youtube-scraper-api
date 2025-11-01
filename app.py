@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py  –  Social-Media Stats API (Flask + IG & TG real avatars)
+# app.py  –  Social-Media Stats API (Flask + IG & FB real avatars)
 # --------------------------------------------------------------
 
 import os
@@ -256,6 +256,7 @@ def scrape_instagram(username):
         "sec-fetch-site": "same-origin",
     }
 
+    # ---- 1. Official API (returns HD pic) ----
     try:
         r = requests.get(api_url, headers=headers, timeout=20)
         if r.status_code == 200:
@@ -267,7 +268,7 @@ def scrape_instagram(username):
                 posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
                 full_name = user.get("full_name") or username
                 bio = user.get("biography") or ""
-                # **REAL AVATAR** – prefer HD version
+                # **FORCE HD AVATAR**
                 avatar = user.get("profile_pic_url_hd") or user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}"
                 is_verified = user.get("is_verified", False)
                 is_private = user.get("is_private", False)
@@ -291,19 +292,23 @@ def scrape_instagram(username):
     except Exception as e:
         print(f"Instagram API error for {username}: {e}")
 
-    # ---- Web-scrape fallback (keeps real avatar if found) ----
+    # ---- 2. Web-scrape fallback (real avatar from og:image) ----
     try:
         web_url = f"https://www.instagram.com/{username}/"
         r = requests.get(web_url, headers=headers, timeout=15)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
-            # Try to pull avatar from og:image (often present)
+
+            # Avatar from og:image
             og_img = soup.find("meta", property="og:image")
             avatar = og_img["content"] if og_img and og_img.get("content") else f"https://unavatar.io/instagram/{username}"
 
+            # Name & stats from og:description
             meta = soup.find("meta", property="og:description")
             txt = meta.get("content", "") if meta else ""
-            name = re.search(r"^([^-(]+)", txt).group(1).strip() if re.search(r"^([^-(]+)", txt) else username
+            name_match = re.search(r"^([^-(]+)", txt)
+            name = name_match.group(1).strip() if name_match else username
+
             followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", txt, re.I)
             following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", txt, re.I)
             posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", txt, re.I)
@@ -325,7 +330,7 @@ def scrape_instagram(username):
     except Exception as e:
         print(f"Instagram web fallback failed: {e}")
 
-    # ---- Unavatar existence check (still returns a picture) ----
+    # ---- 3. Unavatar fallback ----
     try:
         if requests.head(f"https://unavatar.io/instagram/{username}", timeout=5).status_code == 200:
             return {
@@ -422,14 +427,14 @@ async def _tg_async(username):
     try:
         entity = await client.get_entity(username)
 
-        # ---------- Try to download the real photo ----------
+        # ---------- Real photo ----------
         try:
             photo_bytes = await client.download_profile_photo(entity, file=bytes)
             if photo_bytes:
                 b64 = base64.b64encode(photo_bytes).decode()
                 avatar = f"data:image/jpeg;base64,{b64}"
             else:
-                raise ValueError("No photo bytes")
+                raise ValueError("No photo")
         except Exception:
             avatar = f"https://unavatar.io/telegram/{username}"
 
@@ -482,7 +487,7 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK – (unchanged) ====================
+# ==================== FACEBOOK – REAL NAME & AVATAR ====================
 def extract_fb(url_or_at):
     url_lower = url_or_at.lower()
     m = re.search(r"facebook\.com/groups/(\d+)", url_or_at, re.I)
@@ -513,11 +518,15 @@ def scrape_facebook(identifier, entity_type="page"):
         "sec-fetch-site": "none",
     }
 
+    # ---- 1. Desktop version (most reliable) ----
     try:
         r = requests.get(base_url, headers=headers, timeout=20, allow_redirects=True)
         if r.status_code == 200 and "login" not in r.url.lower():
             soup = BeautifulSoup(r.text, "html.parser")
+
+            # === NAME ===
             name = identifier.replace("_", " ").replace("-", " ").title()
+            # From <title>
             title_tag = soup.find("title")
             if title_tag:
                 title_text = title_tag.get_text(strip=True)
@@ -525,7 +534,23 @@ def scrape_facebook(identifier, entity_type="page"):
                 title_text = re.sub(r"^\(?\d+\)?\s*", "", title_text)
                 if title_text and not any(x in title_text.lower() for x in ["log in", "sign up", "facebook", "meta"]):
                     name = title_text
+            # From JSON-LD or og:title
+            og_title = soup.find("meta", property="og:title")
+            if og_title and og_title.get("content"):
+                name = og_title["content"]
 
+            # === AVATAR ===
+            avatar = f"https://unavatar.io/facebook/{identifier}"
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content") and og_img["content"].startswith("http"):
+                avatar = og_img["content"]
+            else:
+                # Sometimes profile pic is in <img> with alt=name
+                img = soup.find("img", alt=lambda x: x and name.lower() in x.lower())
+                if img and img.get("src") and img["src"].startswith("http"):
+                    avatar = img["src"]
+
+            # === STATS ===
             is_group = entity_type == "group" or "/groups/" in r.url
             count = "Hidden"
             count_exact = "0"
@@ -555,6 +580,7 @@ def scrape_facebook(identifier, entity_type="page"):
                 if count != "Hidden":
                     break
 
+            # === BIO ===
             bio = ""
             meta_desc = soup.find("meta", {"property": "og:description"}) or soup.find("meta", {"name": "description"})
             if meta_desc:
@@ -564,13 +590,6 @@ def scrape_facebook(identifier, entity_type="page"):
                 bio = re.sub(r"\s*\.?\s*Sign\s+[Uu]p.*", "", bio)
                 bio = re.sub(r"\d+(?:,\d{3})*\s*(?:people follow|followers?|members?|likes?).*", "", bio, flags=re.I)
                 bio = bio.strip()[:250]
-
-            avatar = f"https://unavatar.io/facebook/{identifier}"
-            og_img = soup.find("meta", {"property": "og:image"})
-            if og_img and og_img.get("content"):
-                img_url = og_img["content"]
-                if img_url.startswith("http"):
-                    avatar = img_url
 
             return {
                 "success": True,
@@ -589,7 +608,39 @@ def scrape_facebook(identifier, entity_type="page"):
     except Exception as e:
         print(f"FB desktop error {identifier}: {e}")
 
-    # ---- Unavatar fallback ----
+    # ---- 2. Mobile fallback (still gets avatar) ----
+    try:
+        mobile_url = base_url.replace("www.facebook.com", "m.facebook.com")
+        r = requests.get(mobile_url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            name = identifier.replace("_", " ").replace("-", " ").title()
+            h = soup.find(["h1", "h2", "h3"])
+            if h: name = h.get_text(strip=True)
+
+            avatar = f"https://unavatar.io/facebook/{identifier}"
+            img = soup.find("img", alt=lambda x: x and name.lower() in x.lower())
+            if img and img.get("src") and img["src"].startswith("http"):
+                avatar = img["src"]
+
+            return {
+                "success": True,
+                "platform": "facebook",
+                "username": identifier,
+                "name": name,
+                "type": "Group" if entity_type == "group" else "Page",
+                "count": "Hidden",
+                "count_exact": "0",
+                "count_label": "",
+                "profile_url": base_url,
+                "profile_image": avatar,
+                "bio": "Limited info from mobile view",
+                "method": "facebook_mobile",
+            }
+    except Exception as e:
+        print(f"FB mobile error {identifier}: {e}")
+
+    # ---- 3. Unavatar fallback ----
     try:
         if requests.head(f"https://unavatar.io/facebook/{identifier}", timeout=5).status_code == 200:
             return {
@@ -668,7 +719,7 @@ def universal_scrape():
     return jsonify({"success": False, "error": "Unsupported platform or invalid URL"}), 400
 
 
-# Platform-specific endpoints (unchanged)
+# Platform-specific endpoints
 @app.route("/api/youtube", methods=["POST"])
 def youtube_endpoint():
     url = (request.get_json() or {}).get("url", "")
@@ -725,21 +776,22 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "13.1 – IG & TG real avatars",
+        "version": "13.2 – IG & FB real avatars + names",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
             "/api/twitter": "POST – Twitter/X",
-            "/api/instagram": "POST – Instagram (official API)",
+            "/api/instagram": "POST – Instagram (official API + HD pic)",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram (real photo)",
-            "/api/facebook": "POST – Facebook (Pages & Groups)",
+            "/api/facebook": "POST – Facebook (real name & avatar)",
             "/api/health": "GET – health check",
         },
         "notes": {
-            "instagram": "Uses Instagram web API – returns real HD profile picture.",
-            "telegram": "Downloads the actual photo and returns a data-URI (fallback to unavatar).",
+            "instagram": "Uses Instagram web API – always returns HD profile picture.",
+            "facebook": "Extracts real name from title/og:title and real avatar from og:image or profile <img>.",
+            "telegram": "Downloads actual photo as data-URI.",
         }
     })
 
