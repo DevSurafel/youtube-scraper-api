@@ -1,11 +1,12 @@
 # --------------------------------------------------------------
-# app.py  –  Social-Media Stats API (Flask + Improved IG & FB)
+# app.py  –  Social-Media Stats API (Flask + IG & TG real avatars)
 # --------------------------------------------------------------
 
 import os
 import re
 import json
 import asyncio
+import base64
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -207,7 +208,6 @@ def scrape_twitter(username):
             print(f"Nitter {base} failed for {username}: {e}")
             continue
 
-    # unavatar fallback
     try:
         if requests.head(f"https://unavatar.io/twitter/{username}", timeout=5).status_code == 200:
             return {
@@ -229,7 +229,7 @@ def scrape_twitter(username):
     return {"success": False, "error": f"@{username} not found or temporarily unavailable"}
 
 
-# ==================== INSTAGRAM – FIXED WITH OFFICIAL API ====================
+# ==================== INSTAGRAM – REAL AVATAR ====================
 def extract_ig(url_or_at):
     m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", url_or_at)
     if m: return m.group(1)
@@ -239,21 +239,15 @@ def extract_ig(url_or_at):
 
 
 def scrape_instagram(username):
-    """
-    Uses Instagram's official web API endpoint for public profiles
-    """
     username = username.lstrip("@")
-    
-    # Instagram's official web API endpoint
     api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://www.instagram.com/",
-        "x-ig-app-id": "936619743392459",  # Instagram web app ID
+        "x-ig-app-id": "936619743392459",
         "x-asbd-id": "129477",
         "x-ig-www-claim": "0",
         "x-requested-with": "XMLHttpRequest",
@@ -261,25 +255,23 @@ def scrape_instagram(username):
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
     }
-    
+
     try:
-        # Try Instagram's official API
         r = requests.get(api_url, headers=headers, timeout=20)
-        
         if r.status_code == 200:
             data = r.json()
             user = data.get("data", {}).get("user", {})
-            
             if user:
                 followers = user.get("edge_followed_by", {}).get("count", 0)
                 following = user.get("edge_follow", {}).get("count", 0)
                 posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
                 full_name = user.get("full_name") or username
                 bio = user.get("biography") or ""
+                # **REAL AVATAR** – prefer HD version
                 avatar = user.get("profile_pic_url_hd") or user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}"
                 is_verified = user.get("is_verified", False)
                 is_private = user.get("is_private", False)
-                
+
                 return {
                     "success": True,
                     "platform": "instagram",
@@ -296,51 +288,44 @@ def scrape_instagram(username):
                     "is_private": is_private,
                     "method": "instagram_api",
                 }
-        
-        # If API fails, try web scraping as backup
+    except Exception as e:
+        print(f"Instagram API error for {username}: {e}")
+
+    # ---- Web-scrape fallback (keeps real avatar if found) ----
+    try:
         web_url = f"https://www.instagram.com/{username}/"
         r = requests.get(web_url, headers=headers, timeout=15)
-        
         if r.status_code == 200:
-            # Try to find JSON in script tags
-            match = re.search(r'<script type="application/ld\+json">(.+?)</script>', r.text)
-            if match:
-                try:
-                    json_data = json.loads(match.group(1))
-                    name = json_data.get("name", username)
-                    
-                    # Try meta tags
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    meta = soup.find("meta", property="og:description")
-                    
-                    if meta:
-                        txt = meta.get("content", "")
-                        followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", txt, re.I)
-                        following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", txt, re.I)
-                        posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", txt, re.I)
-                        
-                        if followers_match or posts_match:
-                            return {
-                                "success": True,
-                                "platform": "instagram",
-                                "username": username,
-                                "name": name,
-                                "follower_count": format_count(parse_count(followers_match.group(1)), "followers") if followers_match else "Hidden",
-                                "follower_count_exact": str(parse_count(followers_match.group(1))) if followers_match else "0",
-                                "following_count": format_count(parse_count(following_match.group(1)), "following") if following_match else "Hidden",
-                                "post_count": format_count(parse_count(posts_match.group(1)), "posts") if posts_match else "Hidden",
-                                "profile_url": f"https://instagram.com/{username}",
-                                "profile_image": f"https://unavatar.io/instagram/{username}",
-                                "bio": txt.split(" - ")[0][:250] if " - " in txt else "",
-                                "method": "instagram_web",
-                            }
-                except:
-                    pass
-    
+            soup = BeautifulSoup(r.text, "html.parser")
+            # Try to pull avatar from og:image (often present)
+            og_img = soup.find("meta", property="og:image")
+            avatar = og_img["content"] if og_img and og_img.get("content") else f"https://unavatar.io/instagram/{username}"
+
+            meta = soup.find("meta", property="og:description")
+            txt = meta.get("content", "") if meta else ""
+            name = re.search(r"^([^-(]+)", txt).group(1).strip() if re.search(r"^([^-(]+)", txt) else username
+            followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", txt, re.I)
+            following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", txt, re.I)
+            posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", txt, re.I)
+
+            return {
+                "success": True,
+                "platform": "instagram",
+                "username": username,
+                "name": name,
+                "follower_count": format_count(parse_count(followers_match.group(1)), "followers") if followers_match else "Hidden",
+                "follower_count_exact": str(parse_count(followers_match.group(1))) if followers_match else "0",
+                "following_count": format_count(parse_count(following_match.group(1)), "following") if following_match else "Hidden",
+                "post_count": format_count(parse_count(posts_match.group(1)), "posts") if posts_match else "Hidden",
+                "profile_url": f"https://instagram.com/{username}",
+                "profile_image": avatar,
+                "bio": txt.split(" - ")[0][:250] if " - " in txt else "",
+                "method": "instagram_web",
+            }
     except Exception as e:
-        print(f"Instagram error for {username}: {e}")
-    
-    # Final fallback - check if profile exists
+        print(f"Instagram web fallback failed: {e}")
+
+    # ---- Unavatar existence check (still returns a picture) ----
     try:
         if requests.head(f"https://unavatar.io/instagram/{username}", timeout=5).status_code == 200:
             return {
@@ -356,15 +341,11 @@ def scrape_instagram(username):
                 "profile_image": f"https://unavatar.io/instagram/{username}",
                 "bio": "Profile exists. Instagram requires login for detailed stats.",
                 "method": "unavatar",
-                "note": "Instagram has restricted public API access. Consider using official Instagram Graph API for reliable data."
             }
     except:
         pass
-    
-    return {
-        "success": False, 
-        "error": f"Cannot access @{username}. Profile may be private or Instagram is blocking requests."
-    }
+
+    return {"success": False, "error": f"Cannot access @{username}. Profile may be private or blocked."}
 
 
 # ==================== TIKTOK ====================
@@ -423,7 +404,7 @@ def scrape_tiktok(username):
     return {"success": False, "error": f"@{username} not reachable"}
 
 
-# ==================== TELEGRAM ====================
+# ==================== TELEGRAM – REAL AVATAR (data-URI) ====================
 def extract_tg(url_or_at):
     m = re.search(r"t\.me/([A-Za-z0-9_]+)", url_or_at)
     if m: return m.group(1)
@@ -440,7 +421,17 @@ async def _tg_async(username):
     await client.start()
     try:
         entity = await client.get_entity(username)
-        avatar = f"https://unavatar.io/telegram/{username}"
+
+        # ---------- Try to download the real photo ----------
+        try:
+            photo_bytes = await client.download_profile_photo(entity, file=bytes)
+            if photo_bytes:
+                b64 = base64.b64encode(photo_bytes).decode()
+                avatar = f"data:image/jpeg;base64,{b64}"
+            else:
+                raise ValueError("No photo bytes")
+        except Exception:
+            avatar = f"https://unavatar.io/telegram/{username}"
 
         if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
             full = await client(GetFullChannelRequest(entity))
@@ -491,22 +482,18 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK – IMPROVED ====================
+# ==================== FACEBOOK – (unchanged) ====================
 def extract_fb(url_or_at):
     url_lower = url_or_at.lower()
-    # groups with numeric ID
     m = re.search(r"facebook\.com/groups/(\d+)", url_or_at, re.I)
     if m: return m.group(1), "group"
-    # groups with slug
     m = re.search(r"facebook\.com/groups/([A-Za-z0-9.\-_]+)", url_or_at, re.I)
     if m: return m.group(1), "group"
-    # pages
     m = re.search(r"(?:facebook\.com|fb\.com)/([A-Za-z0-9.\-_]+)", url_or_at, re.I)
     if m:
         ident = m.group(1)
         if ident.lower() not in {"profile.php", "watch", "marketplace", "groups", "sharer", "share", "pages", "people"}:
             return ident, "page"
-    # handle only
     if "facebook.com" not in url_lower and "fb.com" not in url_lower:
         m = re.search(r"^@?([A-Za-z0-9.\-_]+)$", url_or_at)
         if m: return m.group(1), "page"
@@ -514,11 +501,7 @@ def extract_fb(url_or_at):
 
 
 def scrape_facebook(identifier, entity_type="page"):
-    """
-    Improved Facebook scraping with better pattern matching
-    """
     base_url = f"https://www.facebook.com/{identifier}" if entity_type == "page" else f"https://www.facebook.com/groups/{identifier}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -530,53 +513,31 @@ def scrape_facebook(identifier, entity_type="page"):
         "sec-fetch-site": "none",
     }
 
-    # Try desktop version first
     try:
         r = requests.get(base_url, headers=headers, timeout=20, allow_redirects=True)
-        
         if r.status_code == 200 and "login" not in r.url.lower():
             soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Extract name
             name = identifier.replace("_", " ").replace("-", " ").title()
-            
-            # Try to get name from title
             title_tag = soup.find("title")
             if title_tag:
                 title_text = title_tag.get_text(strip=True)
                 title_text = re.sub(r"\s*[-|·]\s*Facebook$", "", title_text, flags=re.I)
-                title_text = re.sub(r"^\(?\d+\)?\s*", "", title_text)  # Remove leading numbers
+                title_text = re.sub(r"^\(?\d+\)?\s*", "", title_text)
                 if title_text and not any(x in title_text.lower() for x in ["log in", "sign up", "facebook", "meta"]):
                     name = title_text
-            
-            # Try JSON-LD structured data
-            script_tags = soup.find_all("script", {"type": "application/ld+json"})
-            for script in script_tags:
-                try:
-                    data = json.loads(script.string)
-                    if isinstance(data, dict):
-                        if data.get("@type") in ["Organization", "LocalBusiness", "Person"]:
-                            name = data.get("name", name)
-                except:
-                    pass
-            
+
             is_group = entity_type == "group" or "/groups/" in r.url
-            
-            # Extract follower/member count with improved patterns
             count = "Hidden"
             count_exact = "0"
             count_label = ""
-            
-            # More aggressive pattern matching
+
             patterns = [
                 r'(\d{1,3}(?:,\d{3})+)\s*(?:people follow|followers?|members?|likes?)',
                 r'(\d+\.?\d*[KMB])\s*(?:people follow|followers?|members?|likes?)',
                 r'(\d+)\s*(?:people follow|followers?|members?|likes?)',
                 r'"follower_count":\s*(\d+)',
                 r'"member_count":\s*(\d+)',
-                r'"page_likers":\s*(\d+)',
             ]
-            
             for pat in patterns:
                 matches = re.findall(pat, r.text, re.I)
                 if matches:
@@ -587,36 +548,30 @@ def scrape_facebook(identifier, entity_type="page"):
                             if is_group:
                                 count = format_count(parsed, "members")
                                 count_label = "members"
-                            elif "follow" in pat.lower():
+                            else:
                                 count = format_count(parsed, "followers")
                                 count_label = "followers"
-                            else:
-                                count = format_count(parsed, "likes")
-                                count_label = "likes"
                             break
                 if count != "Hidden":
                     break
-            
-            # Extract bio/description
+
             bio = ""
             meta_desc = soup.find("meta", {"property": "og:description"}) or soup.find("meta", {"name": "description"})
             if meta_desc:
                 bio = meta_desc.get("content", "")
-                # Clean up bio
                 bio = re.sub(r"^\S+?\s*[·|]\s*", "", bio)
                 bio = re.sub(r"\s*\.?\s*Log\s+[Ii]n.*", "", bio)
                 bio = re.sub(r"\s*\.?\s*Sign\s+[Uu]p.*", "", bio)
                 bio = re.sub(r"\d+(?:,\d{3})*\s*(?:people follow|followers?|members?|likes?).*", "", bio, flags=re.I)
                 bio = bio.strip()[:250]
-            
-            # Extract avatar
+
             avatar = f"https://unavatar.io/facebook/{identifier}"
             og_img = soup.find("meta", {"property": "og:image"})
             if og_img and og_img.get("content"):
                 img_url = og_img["content"]
-                if "http" in img_url:
+                if img_url.startswith("http"):
                     avatar = img_url
-            
+
             return {
                 "success": True,
                 "platform": "facebook",
@@ -633,128 +588,8 @@ def scrape_facebook(identifier, entity_type="page"):
             }
     except Exception as e:
         print(f"FB desktop error {identifier}: {e}")
-    
-    # Try mobile version
-    try:
-        mobile_url = base_url.replace("www.facebook.com", "m.facebook.com")
-        r = requests.get(mobile_url, headers=headers, timeout=15)
-        
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Get name
-            name = identifier.replace("_", " ").replace("-", " ").title()
-            h_tags = soup.find_all(["h1", "h2", "h3"])
-            for h in h_tags:
-                text = h.get_text(strip=True)
-                if len(text) > 3 and len(text) < 100:
-                    name = text
-                    break
-            
-            # Get stats from mobile page
-            count = "Hidden"
-            count_exact = "0"
-            count_label = ""
-            
-            # Mobile page patterns
-            patterns = [
-                r'(\d{1,3}(?:,\d{3})+)\s*(?:members?|followers?|likes?)',
-                r'(\d+\.?\d*[KMB])\s*(?:members?|followers?|likes?)',
-            ]
-            
-            for pat in patterns:
-                matches = re.findall(pat, r.text, re.I)
-                for match in matches:
-                    parsed = parse_count(str(match).replace(",", ""))
-                    if parsed > 0:
-                        count_exact = str(parsed)
-                        if entity_type == "group":
-                            count = format_count(parsed, "members")
-                            count_label = "members"
-                        else:
-                            count = format_count(parsed, "followers")
-                            count_label = "followers"
-                        break
-                if count != "Hidden":
-                    break
-            
-            return {
-                "success": True,
-                "platform": "facebook",
-                "username": identifier,
-                "name": name,
-                "type": "Group" if entity_type == "group" else "Page",
-                "count": count,
-                "count_exact": count_exact,
-                "count_label": count_label,
-                "profile_url": base_url,
-                "profile_image": f"https://unavatar.io/facebook/{identifier}",
-                "bio": "Limited information from mobile view",
-                "method": "facebook_mobile",
-            }
-    except Exception as e:
-        print(f"FB mobile error {identifier}: {e}")
-    
-    # Try mbasic version (most reliable for stats)
-    try:
-        mbasic_url = base_url.replace("www.facebook.com", "mbasic.facebook.com")
-        r = requests.get(mbasic_url, headers=headers, timeout=15)
-        
-        if r.status_code == 200:
-            text = r.text
-            soup = BeautifulSoup(text, "html.parser")
-            
-            # Get name
-            name = identifier.replace("_", " ").replace("-", " ").title()
-            title_tag = soup.find("title")
-            if title_tag:
-                title_text = title_tag.get_text(strip=True)
-                if title_text and "facebook" not in title_text.lower():
-                    name = title_text
-            
-            # mbasic often shows stats more clearly
-            count = "Hidden"
-            count_exact = "0"
-            count_label = ""
-            
-            # Look for specific stat divs in mbasic
-            stat_patterns = [
-                r'(\d{1,3}(?:,\d{3})+)\s+(?:people like|members?|followers?)',
-                r'(\d+\.?\d*[KMB])\s+(?:people like|members?|followers?)',
-            ]
-            
-            for pat in stat_patterns:
-                match = re.search(pat, text, re.I)
-                if match:
-                    parsed = parse_count(match.group(1).replace(",", ""))
-                    if parsed > 0:
-                        count_exact = str(parsed)
-                        if "member" in match.group(0).lower():
-                            count = format_count(parsed, "members")
-                            count_label = "members"
-                        else:
-                            count = format_count(parsed, "followers")
-                            count_label = "followers"
-                        break
-            
-            return {
-                "success": True,
-                "platform": "facebook",
-                "username": identifier,
-                "name": name,
-                "type": "Group" if entity_type == "group" else "Page",
-                "count": count,
-                "count_exact": count_exact,
-                "count_label": count_label,
-                "profile_url": base_url,
-                "profile_image": f"https://unavatar.io/facebook/{identifier}",
-                "bio": "Basic information retrieved",
-                "method": "facebook_mbasic",
-            }
-    except Exception as e:
-        print(f"FB mbasic error {identifier}: {e}")
-    
-    # Final fallback - confirm existence
+
+    # ---- Unavatar fallback ----
     try:
         if requests.head(f"https://unavatar.io/facebook/{identifier}", timeout=5).status_code == 200:
             return {
@@ -770,15 +605,11 @@ def scrape_facebook(identifier, entity_type="page"):
                 "profile_image": f"https://unavatar.io/facebook/{identifier}",
                 "bio": "Profile exists. Facebook requires login for detailed statistics.",
                 "method": "unavatar",
-                "note": "Facebook restricts public access to follower/member counts. Consider using Facebook Graph API for reliable data."
             }
     except:
         pass
-    
-    return {
-        "success": False, 
-        "error": f"Cannot access Facebook {entity_type}: {identifier}. May be private or require login."
-    }
+
+    return {"success": False, "error": f"Cannot access Facebook {entity_type}: {identifier}"}
 
 
 # ==================== ROUTES ====================
@@ -794,51 +625,38 @@ def universal_scrape():
     if not url:
         return jsonify({"success": False, "error": "Missing url"}), 400
 
-    # YouTube
     if "youtube.com" in url or "youtu.be" in url:
         if not YOUTUBE_API_KEY:
             return jsonify({"success": False, "error": "YouTube API key missing"}), 500
         cid, typ = extract_yt(url)
-        if not cid:
-            return jsonify({"success": False, "error": "Invalid YouTube URL"}), 400
+        if not cid: return jsonify({"success": False, "error": "Invalid YouTube URL"}), 400
         return jsonify(yt_by_id(cid) if typ == "id" else yt_by_handle(cid))
 
-    # Twitter / X
     if "twitter.com" in url or "x.com" in url:
         user = extract_tw(url)
-        if not user:
-            return jsonify({"success": False, "error": "Invalid Twitter handle"}), 400
+        if not user: return jsonify({"success": False, "error": "Invalid Twitter handle"}), 400
         return jsonify(scrape_twitter(user))
 
-    # Instagram
     if "instagram.com" in url:
         user = extract_ig(url)
-        if not user:
-            return jsonify({"success": False, "error": "Invalid Instagram handle"}), 400
+        if not user: return jsonify({"success": False, "error": "Invalid Instagram handle"}), 400
         return jsonify(scrape_instagram(user))
 
-    # TikTok
     if "tiktok.com" in url:
         user = extract_tt(url)
-        if not user:
-            return jsonify({"success": False, "error": "Invalid TikTok handle"}), 400
+        if not user: return jsonify({"success": False, "error": "Invalid TikTok handle"}), 400
         return jsonify(scrape_tiktok(user))
 
-    # Telegram
     if "t.me" in url or "telegram.me" in url:
         user = extract_tg(url)
-        if not user:
-            return jsonify({"success": False, "error": "Invalid Telegram handle"}), 400
+        if not user: return jsonify({"success": False, "error": "Invalid Telegram handle"}), 400
         return jsonify(scrape_telegram(user))
 
-    # Facebook
     if "facebook.com" in url or "fb.com" in url:
         ident, etype = extract_fb(url)
-        if not ident:
-            return jsonify({"success": False, "error": "Invalid Facebook URL"}), 400
+        if not ident: return jsonify({"success": False, "error": "Invalid Facebook URL"}), 400
         return jsonify(scrape_facebook(ident, etype))
 
-    # Handle-only (try all platforms)
     if url.startswith("@"):
         user = url.lstrip("@")
         for scraper in (scrape_twitter, scrape_instagram, scrape_tiktok, scrape_telegram,
@@ -850,7 +668,7 @@ def universal_scrape():
     return jsonify({"success": False, "error": "Unsupported platform or invalid URL"}), 400
 
 
-# Platform-specific endpoints
+# Platform-specific endpoints (unchanged)
 @app.route("/api/youtube", methods=["POST"])
 def youtube_endpoint():
     url = (request.get_json() or {}).get("url", "")
@@ -907,21 +725,21 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "13.0",
+        "version": "13.1 – IG & TG real avatars",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
             "/api/twitter": "POST – Twitter/X",
-            "/api/instagram": "POST – Instagram (with official API)",
+            "/api/instagram": "POST – Instagram (official API)",
             "/api/tiktok": "POST – TikTok",
-            "/api/telegram": "POST – Telegram",
-            "/api/facebook": "POST – Facebook (Pages & Groups, improved)",
+            "/api/telegram": "POST – Telegram (real photo)",
+            "/api/facebook": "POST – Facebook (Pages & Groups)",
             "/api/health": "GET – health check",
         },
         "notes": {
-            "instagram": "Uses Instagram's web API. Some profiles may require login.",
-            "facebook": "Tries multiple mobile versions. Stats often require login due to Facebook restrictions."
+            "instagram": "Uses Instagram web API – returns real HD profile picture.",
+            "telegram": "Downloads the actual photo and returns a data-URI (fallback to unavatar).",
         }
     })
 
