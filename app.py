@@ -18,10 +18,16 @@ def extract_channel_info(channel_url):
     try:
         # Configure Chrome options for headless browsing
         chrome_options = Options()
-        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-logging')
+        chrome_options.add_argument('--log-level=3')
+        chrome_options.add_argument('--single-process')
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
         # Initialize the driver - Render has Chrome pre-installed
@@ -30,8 +36,8 @@ def extract_channel_info(channel_url):
         # Load the channel page
         driver.get(channel_url)
         
-        # Wait for the page to load
-        wait = WebDriverWait(driver, 10)
+        # Wait for the page to load with shorter timeout
+        wait = WebDriverWait(driver, 15)
         
         # Extract channel name
         channel_name = wait.until(
