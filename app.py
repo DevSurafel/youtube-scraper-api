@@ -658,8 +658,8 @@ def scrape_facebook(identifier, entity_type="page"):
         if meta_desc and meta_desc.get("content"):
             bio_text = meta_desc.get("content", "").strip()
             bio_text = re.sub(r'^.*?[·|]\s*', '', bio_text)
-            bio_text = re.sub(r'\s*Log In.*, '', bio_text, flags=re.I)
-            bio_text = re.sub(r'\s*See more of.*, '', bio_text, flags=re.I)
+            bio_text = re.sub(r'\s*Log In.*', '', bio_text, flags=re.I)  # FIXED
+            bio_text = re.sub(r'\s*See more of.*', '', bio_text, flags=re.I)  # FIXED
             bio_text = re.sub(r'\s*\d+\s*(?:people|likes|followers).*', '', bio_text, flags=re.I)
             if len(bio_text) > 10:
                 bio = bio_text[:250]
@@ -710,6 +710,7 @@ def scrape_facebook(identifier, entity_type="page"):
     except Exception as e:
         print(f"Facebook scrape error for {identifier}: {e}")
 
+    # Mobile fallback
     try:
         mobile_url = url.replace("www.facebook.com", "mbasic.facebook.com")
         r = requests.get(mobile_url, headers=headers, timeout=15)
@@ -743,7 +744,7 @@ def scrape_facebook(identifier, entity_type="page"):
                 "name": name,
                 "type": "Group" if is_group else "Page",
                 "count": count,
-                "count_exact": str(parse_count(count)) if count != "Hidden" else "0",
+                "count_exact": str(parsed) if count != "Hidden" else "0",
                 "count_label": count_label,
                 "profile_url": url,
                 "profile_image": f"https://unavatar.io/facebook/{identifier}",
@@ -754,6 +755,7 @@ def scrape_facebook(identifier, entity_type="page"):
     except Exception as e:
         print(f"Facebook mobile scrape failed: {e}")
 
+    # Unavatar fallback
     try:
         avatar_url = f"https://unavatar.io/facebook/{identifier}"
         check = requests.head(avatar_url, timeout=5)
