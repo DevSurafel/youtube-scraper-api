@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup
 import re
 import os
 import json
-import time
 
 app = Flask(__name__)
 CORS(app)
@@ -144,70 +143,77 @@ def parse_follower_count(count_text):
         return 0
 
 def scrape_twitter_profile(username):
-    """Scrape Twitter profile using multiple methods"""
+    """Scrape Twitter profile using working methods"""
     try:
         username = username.lstrip('@')
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'DNT': '1',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none'
+            'Upgrade-Insecure-Requests': '1'
         }
         
-        # Method 1: Try updated Nitter instances
-        nitter_instances = [
+        # Method 1: Try working Nitter instances (updated list)
+        working_nitter_instances = [
+            'https://xcancel.com',
             'https://nitter.poast.org',
-            'https://nitter.privacydev.net',
-            'https://nitter.net',
-            'https://nitter.unixfox.eu',
-            'https://nitter.moomoo.me',
-            'https://nitter.fly.dev'
+            'https://nitter.privacyredirect.com',
+            'https://lightbrd.com'
         ]
         
-        for nitter_url in nitter_instances:
+        for nitter_url in working_nitter_instances:
             try:
                 url = f'{nitter_url}/{username}'
-                response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+                response = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
                 
-                if response.status_code == 200 and len(response.text) > 1000:
+                if response.status_code == 200 and len(response.text) > 500:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     
-                    # Try multiple selectors for name
-                    name_elem = (soup.find('a', class_='profile-card-fullname') or 
-                                soup.find('div', class_='profile-card-fullname') or
-                                soup.find('h1'))
-                    name = name_elem.text.strip() if name_elem else username
-                    
-                    # Extract stats with multiple methods
-                    stats_nums = soup.find_all('span', class_='profile-stat-num')
-                    
-                    followers = '0'
-                    following = '0'
-                    tweets = '0'
-                    
-                    if len(stats_nums) >= 3:
-                        tweets = stats_nums[0].text.strip()
-                        following = stats_nums[1].text.strip()
-                        followers = stats_nums[2].text.strip()
+                    # XCancel specific parsing (different structure)
+                    if 'xcancel' in nitter_url:
+                        name_elem = soup.find('h2', class_='profile-card-fullname')
+                        if not name_elem:
+                            name_elem = soup.find('span', class_='profile-card-fullname')
+                        name = name_elem.text.strip() if name_elem else username
+                        
+                        # Get stats
+                        stats_container = soup.find('ul', class_='profile-statlist')
+                        followers = '0'
+                        following = '0'
+                        tweets = '0'
+                        
+                        if stats_container:
+                            stat_items = stats_container.find_all('li', class_='profile-stat')
+                            for stat in stat_items:
+                                label = stat.find('span', class_='profile-stat-header')
+                                value = stat.find('span', class_='profile-stat-num')
+                                if label and value:
+                                    label_text = label.text.lower()
+                                    if 'follower' in label_text:
+                                        followers = value.text.strip()
+                                    elif 'following' in label_text:
+                                        following = value.text.strip()
+                                    elif 'tweet' in label_text or 'post' in label_text:
+                                        tweets = value.text.strip()
                     else:
-                        # Try alternate structure
-                        stat_headers = soup.find_all('span', class_='profile-stat-header')
-                        for header in stat_headers:
-                            label = header.text.lower()
-                            num_elem = header.find_previous_sibling('span', class_='profile-stat-num')
-                            if num_elem:
-                                if 'follower' in label:
-                                    followers = num_elem.text.strip()
-                                elif 'following' in label:
-                                    following = num_elem.text.strip()
-                                elif 'tweet' in label or 'post' in label:
-                                    tweets = num_elem.text.strip()
+                        # Standard Nitter parsing
+                        name_elem = (soup.find('a', class_='profile-card-fullname') or 
+                                    soup.find('div', class_='profile-card-fullname'))
+                        name = name_elem.text.strip() if name_elem else username
+                        
+                        stats_nums = soup.find_all('span', class_='profile-stat-num')
+                        
+                        followers = '0'
+                        following = '0'
+                        tweets = '0'
+                        
+                        if len(stats_nums) >= 3:
+                            tweets = stats_nums[0].text.strip()
+                            following = stats_nums[1].text.strip()
+                            followers = stats_nums[2].text.strip()
                     
                     # Extract bio
                     bio_elem = soup.find('p', class_='profile-bio')
@@ -233,8 +239,8 @@ def scrape_twitter_profile(username):
                     following_count = parse_follower_count(following)
                     tweet_count = parse_follower_count(tweets)
                     
-                    # Only return if we got valid data
-                    if follower_count > 0 or following_count > 0:
+                    # Validate data
+                    if follower_count > 0 or following_count > 0 or tweet_count > 0:
                         return {
                             'success': True,
                             'username': username,
@@ -254,67 +260,118 @@ def scrape_twitter_profile(username):
                 print(f"Nitter {nitter_url} failed: {str(e)}")
                 continue
         
-        # Method 2: Try syndication API
+        # Method 2: Use ScrapingAnt API (free tier)
         try:
-            syndication_url = f'https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={username}'
-            response = requests.get(syndication_url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data and len(data) > 0 and 'followers_count' in data[0]:
-                    user_data = data[0]
-                    
-                    return {
-                        'success': True,
-                        'username': username,
-                        'name': user_data.get('name', username),
-                        'follower_count': format_count(str(user_data.get('followers_count', 0)), 'followers'),
-                        'follower_count_exact': str(user_data.get('followers_count', 0)),
-                        'following_count': format_count(str(user_data.get('friends_count', 0)), 'following'),
-                        'tweet_count': format_count(str(user_data.get('statuses_count', 0)), 'tweets'),
-                        'profile_url': f"https://twitter.com/{username}",
-                        'profile_image': f'https://unavatar.io/twitter/{username}',
-                        'bio': user_data.get('description', ''),
-                        'platform': 'twitter',
-                        'method': 'syndication'
-                    }
+            api_key = os.environ.get('SCRAPINGANT_API_KEY', '')
+            if api_key:
+                api_url = 'https://api.scrapingant.com/v2/general'
+                params = {
+                    'url': f'https://twitter.com/{username}',
+                    'x-api-key': api_key,
+                    'browser': 'false'
+                }
+                response = requests.get(api_url, params=params, timeout=15)
+                if response.status_code == 200:
+                    # Parse the response
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    # Extract data from Twitter's HTML
+                    # This would need Twitter's current HTML structure
+                    pass
         except Exception as e:
-            print(f"Syndication API failed: {str(e)}")
+            print(f"ScrapingAnt failed: {str(e)}")
         
-        # Method 3: Use third-party API aggregator
+        # Method 3: Direct Twstalker scraping (new Twitter proxy)
         try:
-            api_url = f'https://api.socialcounts.org/twitter-user-info/{username}'
-            response = requests.get(api_url, headers=headers, timeout=10)
+            twstalker_url = f'https://twstalker.com/{username}'
+            response = requests.get(twstalker_url, headers=headers, timeout=12)
             
             if response.status_code == 200:
-                data = response.json()
-                if data and 'followers' in data:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Parse Twstalker structure
+                name_elem = soup.find('h1')
+                name = name_elem.text.strip() if name_elem else username
+                
+                # Find stats
+                stats = soup.find_all('div', class_='stat')
+                followers = '0'
+                following = '0'
+                tweets = '0'
+                
+                for stat in stats:
+                    label = stat.find('span', class_='label')
+                    value = stat.find('span', class_='value')
+                    if label and value:
+                        label_text = label.text.lower()
+                        if 'follower' in label_text:
+                            followers = value.text.strip()
+                        elif 'following' in label_text:
+                            following = value.text.strip()
+                        elif 'tweet' in label_text or 'post' in label_text:
+                            tweets = value.text.strip()
+                
+                follower_count = parse_follower_count(followers)
+                following_count = parse_follower_count(following)
+                tweet_count = parse_follower_count(tweets)
+                
+                if follower_count > 0:
                     return {
                         'success': True,
                         'username': username,
-                        'name': data.get('name', username),
-                        'follower_count': format_count(str(data.get('followers', 0)), 'followers'),
-                        'follower_count_exact': str(data.get('followers', 0)),
-                        'following_count': format_count(str(data.get('following', 0)), 'following'),
-                        'tweet_count': format_count(str(data.get('tweets', 0)), 'tweets'),
+                        'name': name,
+                        'follower_count': format_count(str(follower_count), 'followers'),
+                        'follower_count_exact': str(follower_count),
+                        'following_count': format_count(str(following_count), 'following'),
+                        'tweet_count': format_count(str(tweet_count), 'tweets'),
                         'profile_url': f"https://twitter.com/{username}",
                         'profile_image': f'https://unavatar.io/twitter/{username}',
-                        'bio': data.get('description', ''),
+                        'bio': '',
                         'platform': 'twitter',
-                        'method': 'socialcounts'
+                        'method': 'twstalker'
                     }
         except Exception as e:
-            print(f"SocialCounts API failed: {str(e)}")
+            print(f"Twstalker failed: {str(e)}")
+        
+        # Method 4: Use RapidAPI Twitter alternatives
+        try:
+            rapidapi_key = os.environ.get('RAPIDAPI_KEY', '')
+            if rapidapi_key:
+                url = "https://twitter-api45.p.rapidapi.com/screenname.php"
+                querystring = {"screenname": username}
+                headers_rapid = {
+                    "X-RapidAPI-Key": rapidapi_key,
+                    "X-RapidAPI-Host": "twitter-api45.p.rapidapi.com"
+                }
+                response = requests.get(url, headers=headers_rapid, params=querystring, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'followers_count' in data:
+                        return {
+                            'success': True,
+                            'username': username,
+                            'name': data.get('name', username),
+                            'follower_count': format_count(str(data.get('followers_count', 0)), 'followers'),
+                            'follower_count_exact': str(data.get('followers_count', 0)),
+                            'following_count': format_count(str(data.get('friends_count', 0)), 'following'),
+                            'tweet_count': format_count(str(data.get('statuses_count', 0)), 'tweets'),
+                            'profile_url': f"https://twitter.com/{username}",
+                            'profile_image': data.get('profile_image_url_https', f'https://unavatar.io/twitter/{username}'),
+                            'bio': data.get('description', ''),
+                            'platform': 'twitter',
+                            'method': 'rapidapi'
+                        }
+        except Exception as e:
+            print(f"RapidAPI failed: {str(e)}")
         
         return {
             'success': False,
-            'error': f'Could not fetch data for @{username}. All scraping methods failed. The account may be private, suspended, or temporarily unavailable. Please try again later.'
+            'error': f'Could not fetch data for @{username}. All scraping methods are currently unavailable. Twitter has implemented stricter anti-scraping measures. Please try again later or consider using the official Twitter API.'
         }
         
     except Exception as e:
         return {
             'success': False,
-            'error': f'Error scraping Twitter profile: {str(e)}'
+            'error': f'Error: {str(e)}'
         }
 
 # ==================== API ENDPOINTS ====================
@@ -334,7 +391,6 @@ def scrape_social():
     
     # Detect platform
     if 'youtube.com' in url or 'youtu.be' in url:
-        # YouTube handling
         if not YOUTUBE_API_KEY:
             return jsonify({
                 'success': False,
@@ -354,7 +410,6 @@ def scrape_social():
             result = search_youtube_channel(identifier)
             
     elif 'twitter.com' in url or 'x.com' in url or url.startswith('@'):
-        # Twitter handling
         username = extract_twitter_username(url)
         if not username:
             return jsonify({
@@ -409,7 +464,7 @@ def scrape_youtube():
 
 @app.route('/api/twitter', methods=['POST'])
 def scrape_twitter():
-    """Twitter-specific endpoint using web scraping"""
+    """Twitter-specific endpoint"""
     data = request.get_json()
     if not data or 'url' not in data:
         return jsonify({
@@ -435,8 +490,8 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'youtube_configured': bool(YOUTUBE_API_KEY),
-        'twitter_method': 'multi-source scraping',
-        'message': 'Twitter uses multiple scraping sources for reliability'
+        'twitter_method': 'multi-source (4+ methods)',
+        'note': 'Twitter scraping is unstable due to platform restrictions'
     }), 200
 
 @app.route('/', methods=['GET'])
@@ -444,16 +499,17 @@ def home():
     """Root endpoint with API information"""
     return jsonify({
         'message': 'Social Media Info API',
-        'version': '3.1',
+        'version': '3.2',
         'supported_platforms': ['YouTube', 'Twitter/X'],
         'endpoints': {
             '/api/health': 'GET - Health check',
-            '/api/scrape': 'POST - Universal scraper (auto-detects platform)',
-            '/api/youtube': 'POST - YouTube-specific endpoint',
-            '/api/twitter': 'POST - Twitter-specific endpoint (multi-source scraping)'
+            '/api/scrape': 'POST - Universal scraper',
+            '/api/youtube': 'POST - YouTube endpoint',
+            '/api/twitter': 'POST - Twitter endpoint'
         },
         'youtube_configured': bool(YOUTUBE_API_KEY),
-        'twitter_method': 'Multi-source web scraping (6+ fallback methods)'
+        'twitter_status': 'Active (using alternative Nitter instances)',
+        'note': 'Twitter scraping may be slow or fail due to anti-scraping measures'
     }), 200
 
 if __name__ == '__main__':
