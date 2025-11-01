@@ -91,14 +91,18 @@ def yt_by_id(cid):
         return {"success": False, "error": "Channel not found"}
     ch = r["items"][0]
     stats = ch["statistics"]
+    snippet = ch["snippet"]
     return {
         "success": True,
         "platform": "youtube",
-        "channel_name": ch["snippet"]["title"],
+        "channel_name": snippet["title"],
         "subscriber_count": format_count(stats.get("subscriberCount", 0), "subscribers"),
         "subscriber_count_exact": stats.get("subscriberCount", "0"),
+        "video_count": format_count(stats.get("videoCount", 0), "videos"),
+        "view_count": format_count(stats.get("viewCount", 0), "views"),
         "channel_url": f"https://www.youtube.com/channel/{cid}",
-        "thumbnail": ch["snippet"]["thumbnails"]["high"]["url"],
+        "thumbnail": snippet["thumbnails"]["high"]["url"],
+        "description": snippet.get("description", "")[:300],
     }
 
 
@@ -452,13 +456,12 @@ def scrape_telegram(username):
 # ==================== FACEBOOK - IMPROVED ====================
 def extract_fb(url_or_at):
     """Extract identifier from Facebook URL with improved group detection"""
-    # Check for group URL first
-    m = re.search(r"facebook\.com/groups/([A-Za-z0-9.\-_]+)", url_or_at)
+    # Check for group URL first (most specific patterns first)
+    m = re.search(r"facebook\.com/groups/(\d+)", url_or_at)
     if m:
         return m.group(1), "group"
     
-    # Check for numeric group ID
-    m = re.search(r"facebook\.com/groups/(\d+)", url_or_at)
+    m = re.search(r"facebook\.com/groups/([A-Za-z0-9.\-_]+)", url_or_at)
     if m:
         return m.group(1), "group"
     
@@ -466,13 +469,14 @@ def extract_fb(url_or_at):
     m = re.search(r"(?:facebook\.com|fb\.com)/([A-Za-z0-9.\-_]+)", url_or_at)
     if m:
         ident = m.group(1)
-        if ident.lower() not in {"profile.php", "watch", "marketplace", "groups"}:
+        if ident.lower() not in {"profile.php", "watch", "marketplace", "groups", "sharer", "share"}:
             return ident, "page"
     
-    # Handle plain username
-    m = re.search(r"^@?([A-Za-z0-9.\-_]+)$", url_or_at)
-    if m:
-        return m.group(1), "page"
+    # Handle plain username (no URL)
+    if not ("facebook.com" in url_or_at or "fb.com" in url_or_at):
+        m = re.search(r"^@?([A-Za-z0-9.\-_]+)$", url_or_at)
+        if m:
+            return m.group(1), "page"
     
     return None, None
 
@@ -492,7 +496,10 @@ def scrape_facebook(identifier, entity_type="page"):
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none"
     }
 
     try:
@@ -509,10 +516,10 @@ def scrape_facebook(identifier, entity_type="page"):
         raw_title = title_tag.get_text(strip=True) if title_tag else ""
         name = re.sub(r"\s*[-|·]\s*Facebook$", "", raw_title).strip()
         
-        # Remove "Log into Facebook" prefix if present
-        name = re.sub(r"^Log into Facebook\s*[-|·]?\s*", "", name).strip()
+        # Remove common Facebook prefixes
+        name = re.sub(r"^(Log into Facebook|Log In or Sign Up to View)\s*[-|·]?\s*", "", name, flags=re.I).strip()
 
-        # Determine if it's a group or page
+        # Determine if it's a group or page from URL and response
         is_group = entity_type == "group" or "/groups/" in url or "/groups/" in r.url
 
         count = "Hidden"
@@ -520,10 +527,11 @@ def scrape_facebook(identifier, entity_type="page"):
         count_label = ""
 
         if is_group:
-            # Group: Look for members
+            # Group: Look for members with multiple patterns
             patterns = [
-                r"([\d,\.]+[KMB]?)\s+members?",
-                r"members?\s*[:\-]?\s*([\d,\.]+[KMB]?)",
+                r"([\d,]+)\s+members?",
+                r"(\d+\.?\d*[KMB])\s+members?",
+                r"members?\s*[:\-]?\s*([\d,]+)",
                 r'"member_count":\s*(\d+)',
                 r'"group_member_count":\s*(\d+)',
             ]
@@ -531,7 +539,7 @@ def scrape_facebook(identifier, entity_type="page"):
             for pattern in patterns:
                 m = re.search(pattern, text, re.I)
                 if m:
-                    count_str = m.group(1).replace(",", "").replace(".", "")
+                    count_str = m.group(1).replace(",", "")
                     count_exact = str(parse_count(count_str))
                     if int(count_exact) > 0:
                         count = format_count(count_exact, "members")
@@ -542,9 +550,10 @@ def scrape_facebook(identifier, entity_type="page"):
         else:
             # Page: Look for followers or likes
             patterns = [
-                (r"([\d,\.]+[KMB]?)\s+followers?", "followers"),
-                (r"followers?\s*[:\-]?\s*([\d,\.]+[KMB]?)", "followers"),
-                (r"([\d,\.]+[KMB]?)\s+(?:people\s+)?likes?", "likes"),
+                (r"([\d,]+)\s+followers?", "followers"),
+                (r"(\d+\.?\d*[KMB])\s+followers?", "followers"),
+                (r"([\d,]+)\s+people\s+like\s+this", "likes"),
+                (r"([\d,]+)\s+likes?", "likes"),
                 (r'"follower_count":\s*(\d+)', "followers"),
                 (r'"page_likers":\s*(\d+)', "likes"),
             ]
@@ -552,7 +561,7 @@ def scrape_facebook(identifier, entity_type="page"):
             for pattern, label in patterns:
                 m = re.search(pattern, text, re.I)
                 if m:
-                    count_str = m.group(1).replace(",", "").replace(".", "")
+                    count_str = m.group(1).replace(",", "")
                     count_exact = str(parse_count(count_str))
                     if int(count_exact) > 0:
                         count = format_count(count_exact, label)
@@ -564,8 +573,10 @@ def scrape_facebook(identifier, entity_type="page"):
         # Extract description
         bio = ""
         meta_desc = soup.find("meta", {"name": "description"})
+        if not meta_desc:
+            meta_desc = soup.find("meta", property="og:description")
         if meta_desc:
-            bio = meta_desc.get("content", "")[:200]
+            bio = meta_desc.get("content", "")[:250]
 
         # Profile image
         img_url = f"https://unavatar.io/facebook/{identifier}"
@@ -573,8 +584,12 @@ def scrape_facebook(identifier, entity_type="page"):
         if meta_img and meta_img.get("content"):
             img_url = meta_img["content"]
 
-        # If we got meaningful data, return success
-        if name and name != "Facebook" and name != identifier:
+        # Return success even if we only got the name (better than complete failure)
+        if name and name not in ["Facebook", "Log into Facebook", identifier]:
+            note_text = None
+            if count == "Hidden":
+                note_text = "Public pages and groups only. Some data may be hidden or require login."
+            
             return {
                 "success": True,
                 "platform": "facebook",
@@ -588,7 +603,7 @@ def scrape_facebook(identifier, entity_type="page"):
                 "profile_image": img_url,
                 "bio": bio or "Facebook scraping is limited. Login may be required for full details.",
                 "method": "basic_scrape",
-                "note": "Public pages and groups only. Some data may be hidden." if count == "Hidden" else None
+                "note": note_text
             }
 
     except Exception as e:
@@ -603,19 +618,19 @@ def scrape_facebook(identifier, entity_type="page"):
                 "success": True,
                 "platform": "facebook",
                 "username": identifier,
-                "name": identifier,
-                "type": "Page/Group",
+                "name": identifier.title(),
+                "type": "Page" if entity_type == "page" else "Group",
                 "count": "Hidden",
                 "count_exact": "0",
                 "count_label": "",
                 "profile_url": url,
                 "profile_image": avatar_url,
-                "bio": "Stats unavailable - login required",
+                "bio": "Stats unavailable - login required or profile is private",
                 "method": "unavatar",
                 "note": "Profile exists but detailed stats require login"
             }
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Unavatar fallback failed: {e}")
 
     return {"success": False, "error": f"Cannot access Facebook: {identifier}"}
 
