@@ -1,88 +1,97 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
 import re
+import os
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend requests
+CORS(app)
 
-def extract_channel_info(channel_url):
-    """
-    Scrapes YouTube channel name and subscriber count
-    """
-    try:
-        # Configure Chrome options for headless browsing
-        chrome_options = Options()
-        chrome_options.add_argument('--headless=new')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-logging')
-        chrome_options.add_argument('--log-level=3')
-        chrome_options.add_argument('--single-process')
-        chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        
-        # Initialize the driver - Render has Chrome pre-installed
-        driver = webdriver.Chrome(options=chrome_options)
-        
-        # Load the channel page
-        driver.get(channel_url)
-        
-        # Wait for the page to load with shorter timeout
-        wait = WebDriverWait(driver, 15)
-        
-        # Extract channel name
-        channel_name = wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "yt-formatted-string.ytd-channel-name"))
-        ).text
-        
-        # Extract subscriber count
-        # YouTube uses different selectors, try multiple approaches
-        try:
-            subscriber_element = driver.find_element(By.ID, "subscriber-count")
-            subscriber_count = subscriber_element.get_attribute("aria-label")
-            # Extract just the number from aria-label (e.g., "1.2 million subscribers")
-            if subscriber_count:
-                subscriber_count = subscriber_count.split("subscriber")[0].strip()
-        except:
-            # Fallback method
-            try:
-                subscriber_element = driver.find_element(By.CSS_SELECTOR, "#subscriber-count")
-                subscriber_count = subscriber_element.text
-            except:
-                subscriber_count = "Subscriber count not available"
-        
-        driver.quit()
-        
+# Get your API key from https://console.cloud.google.com/
+# Enable YouTube Data API v3
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', 'YOUR_API_KEY_HERE')
+
+def extract_channel_id(url):
+    """Extract channel ID from various YouTube URL formats"""
+    patterns = [
+        r'youtube\.com/channel/([\w-]+)',
+        r'youtube\.com/c/([\w-]+)',
+        r'youtube\.com/@([\w-]+)',
+        r'youtube\.com/user/([\w-]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            username_or_id = match.group(1)
+            
+            # If it's already a channel ID (starts with UC)
+            if username_or_id.startswith('UC'):
+                return username_or_id, 'id'
+            else:
+                return username_or_id, 'username'
+    
+    return None, None
+
+def get_channel_info_by_id(channel_id):
+    """Get channel info using channel ID"""
+    url = f'https://www.googleapis.com/youtube/v3/channels'
+    params = {
+        'part': 'snippet,statistics',
+        'id': channel_id,
+        'key': YOUTUBE_API_KEY
+    }
+    
+    response = requests.get(url, params=params)
+    data = response.json()
+    
+    if 'items' in data and len(data['items']) > 0:
+        channel = data['items'][0]
         return {
             'success': True,
-            'channel_name': channel_name,
-            'subscriber_count': subscriber_count,
-            'channel_url': channel_url
+            'channel_name': channel['snippet']['title'],
+            'subscriber_count': format_subscriber_count(channel['statistics'].get('subscriberCount', '0')),
+            'channel_url': f"https://www.youtube.com/channel/{channel_id}",
+            'subscriber_count_exact': channel['statistics'].get('subscriberCount', '0')
         }
-        
-    except Exception as e:
-        if 'driver' in locals():
-            driver.quit()
-        return {
-            'success': False,
-            'error': str(e)
-        }
+    
+    return {'success': False, 'error': 'Channel not found'}
+
+def get_channel_info_by_username(username):
+    """Get channel info using username/handle"""
+    # First, try to search for the channel
+    search_url = f'https://www.googleapis.com/youtube/v3/search'
+    search_params = {
+        'part': 'snippet',
+        'q': username,
+        'type': 'channel',
+        'key': YOUTUBE_API_KEY,
+        'maxResults': 1
+    }
+    
+    response = requests.get(search_url, params=search_params)
+    data = response.json()
+    
+    if 'items' in data and len(data['items']) > 0:
+        channel_id = data['items'][0]['snippet']['channelId']
+        return get_channel_info_by_id(channel_id)
+    
+    return {'success': False, 'error': 'Channel not found'}
+
+def format_subscriber_count(count):
+    """Format subscriber count in readable format"""
+    count = int(count)
+    
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M subscribers"
+    elif count >= 1_000:
+        return f"{count / 1_000:.1f}K subscribers"
+    else:
+        return f"{count} subscribers"
 
 @app.route('/api/scrape', methods=['POST'])
 def scrape_channel():
-    """
-    API endpoint to scrape YouTube channel
-    Expects JSON: {"url": "youtube_channel_url"}
-    """
+    """API endpoint to get YouTube channel info"""
     data = request.get_json()
     
     if not data or 'url' not in data:
@@ -101,12 +110,25 @@ def scrape_channel():
             'error': 'Invalid YouTube URL'
         }), 400
     
-    result = extract_channel_info(channel_url)
+    # Extract channel identifier
+    identifier, id_type = extract_channel_id(channel_url)
+    
+    if not identifier:
+        return jsonify({
+            'success': False,
+            'error': 'Could not extract channel information from URL'
+        }), 400
+    
+    # Get channel info
+    if id_type == 'id':
+        result = get_channel_info_by_id(identifier)
+    else:
+        result = get_channel_info_by_username(identifier)
     
     if result['success']:
         return jsonify(result), 200
     else:
-        return jsonify(result), 500
+        return jsonify(result), 404
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
