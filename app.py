@@ -7,6 +7,7 @@ import os
 import json
 import asyncio
 from functools import wraps
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -20,8 +21,9 @@ TELEGRAM_API_HASH = os.environ.get('TELEGRAM_API_HASH', '')
 TELEGRAM_AVAILABLE = False
 try:
     from telethon.sync import TelegramClient
+    from telethon.tl.functions.channels import GetFullChannelRequest
     from telethon.tl.functions.users import GetFullUserRequest
-    from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError
+    from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, ChannelPrivateError
     TELEGRAM_AVAILABLE = True
 except ImportError:
     print("Warning: Telethon not installed. Telegram scraping will be limited.")
@@ -130,7 +132,7 @@ def search_youtube_channel(handle):
     except Exception as e:
         return {'success': False, 'error': f'Error: {str(e)}'}
 
-# ==================== TWITTER FUNCTIONS ====================
+# ==================== TWITTER FUNCTIONS (IMPROVED) ====================
 
 def extract_twitter_username(url):
     """Extract username from Twitter/X URL"""
@@ -163,7 +165,7 @@ def parse_count(text):
         return 0
 
 def scrape_twitter_profile(username):
-    """Scrape Twitter profile using multiple methods with better reliability"""
+    """Improved Twitter profile scraping with multiple fallback methods"""
     try:
         username = username.lstrip('@')
         
@@ -171,96 +173,194 @@ def scrape_twitter_profile(username):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
         
-        # Method 1: Try multiple Nitter instances with better parsing
-        nitter_instances = [
-            'https://nitter.poast.org',
-            'https://nitter.privacydev.net',
-            'https://xcancel.com'
-        ]
-        
-        for nitter_url in nitter_instances:
-            try:
-                url = f'{nitter_url}/{username}'
-                response = requests.get(url, headers=headers, timeout=15)
+        # Method 1: Try xcancel.com (most reliable Nitter alternative)
+        try:
+            url = f'https://xcancel.com/{username}'
+            response = requests.get(url, headers=headers, timeout=20)
+            
+            if response.status_code == 200 and len(response.text) > 1000:
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
-                if response.status_code == 200 and len(response.text) > 500:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # Try multiple name selectors
-                    name_elem = (soup.find('h2', class_='profile-card-fullname') or 
-                                soup.find('a', class_='profile-card-fullname') or
-                                soup.find('div', class_='profile-card-fullname'))
-                    name = name_elem.text.strip() if name_elem else username
-                    
-                    # Try to find stats container
-                    stats_container = soup.find('ul', class_='profile-statlist')
-                    
-                    followers = '0'
-                    following = '0'
-                    tweets = '0'
-                    
-                    if stats_container:
-                        # Parse stats from list
-                        stat_items = stats_container.find_all('li', class_='profile-stat')
-                        for item in stat_items:
-                            header = item.find('span', class_='profile-stat-header')
-                            num = item.find('span', class_='profile-stat-num')
-                            if header and num:
-                                label = header.text.lower()
-                                if 'tweet' in label or 'post' in label:
-                                    tweets = num.text.strip()
-                                elif 'following' in label:
-                                    following = num.text.strip()
-                                elif 'follower' in label:
-                                    followers = num.text.strip()
-                    else:
-                        # Fallback: find all stat numbers
-                        stats = soup.find_all('span', class_='profile-stat-num')
-                        if len(stats) >= 3:
-                            tweets = stats[0].text.strip()
-                            following = stats[1].text.strip()
-                            followers = stats[2].text.strip()
-                    
-                    follower_count = parse_count(followers)
-                    
-                    # Accept profile even with 0 followers if we found the page
-                    if name != username or follower_count >= 0:
-                        bio_elem = soup.find('p', class_='profile-bio')
-                        bio = bio_elem.text.strip() if bio_elem else ''
-                        
-                        # Get profile image
-                        img_elem = soup.find('a', class_='profile-card-avatar')
-                        profile_image = f'https://unavatar.io/twitter/{username}'
-                        if img_elem:
-                            img_tag = img_elem.find('img')
-                            if img_tag and img_tag.get('src'):
-                                img_src = img_tag['src']
-                                if img_src.startswith('http'):
-                                    profile_image = img_src
-                                elif img_src.startswith('/'):
-                                    profile_image = nitter_url + img_src
-                        
-                        return {
-                            'success': True,
-                            'username': username,
-                            'name': name,
-                            'follower_count': format_count(str(follower_count), 'followers') if follower_count > 0 else 'Hidden',
-                            'follower_count_exact': str(follower_count),
-                            'following_count': format_count(str(parse_count(following)), 'following'),
-                            'tweet_count': format_count(str(parse_count(tweets)), 'tweets'),
-                            'profile_url': f"https://twitter.com/{username}",
-                            'profile_image': profile_image,
-                            'bio': bio,
-                            'platform': 'twitter',
-                            'method': f'nitter ({nitter_url})'
-                        }
-            except Exception as e:
-                print(f"{nitter_url} failed: {e}")
-                continue
+                # Extract name
+                name_elem = soup.find('a', class_='profile-card-fullname')
+                if not name_elem:
+                    name_elem = soup.find('div', class_='profile-card-fullname')
+                name = name_elem.text.strip() if name_elem else username
+                
+                # Extract bio
+                bio_elem = soup.find('p', class_='profile-bio')
+                bio = bio_elem.text.strip() if bio_elem else ''
+                
+                # Extract stats
+                followers = '0'
+                following = '0'
+                tweets = '0'
+                
+                # Try to find stats
+                stats = soup.find_all('span', class_='profile-stat-num')
+                if len(stats) >= 3:
+                    tweets = stats[0].text.strip()
+                    following = stats[1].text.strip()
+                    followers = stats[2].text.strip()
+                else:
+                    # Alternative: find by stat labels
+                    stat_container = soup.find('ul', class_='profile-statlist')
+                    if stat_container:
+                        for li in stat_container.find_all('li'):
+                            label = li.find('span', class_='profile-stat-header')
+                            value = li.find('span', class_='profile-stat-num')
+                            if label and value:
+                                label_text = label.text.lower()
+                                if 'tweet' in label_text or 'post' in label_text:
+                                    tweets = value.text.strip()
+                                elif 'following' in label_text:
+                                    following = value.text.strip()
+                                elif 'follower' in label_text:
+                                    followers = value.text.strip()
+                
+                follower_count = parse_count(followers)
+                
+                # Get profile image
+                img_elem = soup.find('a', class_='profile-card-avatar')
+                profile_image = f'https://unavatar.io/twitter/{username}'
+                if img_elem:
+                    img_tag = img_elem.find('img')
+                    if img_tag and img_tag.get('src'):
+                        img_src = img_tag['src']
+                        if img_src.startswith('http'):
+                            profile_image = img_src
+                        elif img_src.startswith('/'):
+                            profile_image = 'https://xcancel.com' + img_src
+                
+                if follower_count > 0 or name != username:
+                    return {
+                        'success': True,
+                        'username': username,
+                        'name': name,
+                        'follower_count': format_count(str(follower_count), 'followers') if follower_count > 0 else 'Hidden',
+                        'follower_count_exact': str(follower_count),
+                        'following_count': format_count(str(parse_count(following)), 'following'),
+                        'tweet_count': format_count(str(parse_count(tweets)), 'tweets'),
+                        'profile_url': f"https://twitter.com/{username}",
+                        'profile_image': profile_image,
+                        'bio': bio,
+                        'platform': 'twitter',
+                        'method': 'xcancel.com'
+                    }
+        except Exception as e:
+            print(f"xcancel.com failed: {e}")
         
-        # Method 2: Check if profile exists via unavatar
+        # Method 2: Try nitter.poast.org
+        try:
+            url = f'https://nitter.poast.org/{username}'
+            response = requests.get(url, headers=headers, timeout=20)
+            
+            if response.status_code == 200 and len(response.text) > 1000:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                name_elem = soup.find('a', class_='profile-card-fullname')
+                name = name_elem.text.strip() if name_elem else username
+                
+                bio_elem = soup.find('p', class_='profile-bio')
+                bio = bio_elem.text.strip() if bio_elem else ''
+                
+                stats = soup.find_all('span', class_='profile-stat-num')
+                followers = stats[2].text.strip() if len(stats) >= 3 else '0'
+                following = stats[1].text.strip() if len(stats) >= 2 else '0'
+                tweets = stats[0].text.strip() if len(stats) >= 1 else '0'
+                
+                follower_count = parse_count(followers)
+                
+                if follower_count > 0 or name != username:
+                    return {
+                        'success': True,
+                        'username': username,
+                        'name': name,
+                        'follower_count': format_count(str(follower_count), 'followers'),
+                        'follower_count_exact': str(follower_count),
+                        'following_count': format_count(str(parse_count(following)), 'following'),
+                        'tweet_count': format_count(str(parse_count(tweets)), 'tweets'),
+                        'profile_url': f"https://twitter.com/{username}",
+                        'profile_image': f'https://unavatar.io/twitter/{username}',
+                        'bio': bio,
+                        'platform': 'twitter',
+                        'method': 'nitter.poast.org'
+                    }
+        except Exception as e:
+            print(f"nitter.poast.org failed: {e}")
+        
+        # Method 3: Try nitter.privacydev.net
+        try:
+            url = f'https://nitter.privacydev.net/{username}'
+            response = requests.get(url, headers=headers, timeout=20)
+            
+            if response.status_code == 200 and len(response.text) > 1000:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                name_elem = soup.find('a', class_='profile-card-fullname')
+                name = name_elem.text.strip() if name_elem else username
+                
+                bio_elem = soup.find('p', class_='profile-bio')
+                bio = bio_elem.text.strip() if bio_elem else ''
+                
+                stats = soup.find_all('span', class_='profile-stat-num')
+                followers = stats[2].text.strip() if len(stats) >= 3 else '0'
+                following = stats[1].text.strip() if len(stats) >= 2 else '0'
+                tweets = stats[0].text.strip() if len(stats) >= 1 else '0'
+                
+                follower_count = parse_count(followers)
+                
+                if follower_count > 0 or name != username:
+                    return {
+                        'success': True,
+                        'username': username,
+                        'name': name,
+                        'follower_count': format_count(str(follower_count), 'followers'),
+                        'follower_count_exact': str(follower_count),
+                        'following_count': format_count(str(parse_count(following)), 'following'),
+                        'tweet_count': format_count(str(parse_count(tweets)), 'tweets'),
+                        'profile_url': f"https://twitter.com/{username}",
+                        'profile_image': f'https://unavatar.io/twitter/{username}',
+                        'bio': bio,
+                        'platform': 'twitter',
+                        'method': 'nitter.privacydev.net'
+                    }
+        except Exception as e:
+            print(f"nitter.privacydev.net failed: {e}")
+        
+        # Method 4: Syndication API (Twitter's public API)
+        try:
+            api_url = f'https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={username}'
+            response = requests.get(api_url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    user_data = data[0]
+                    return {
+                        'success': True,
+                        'username': username,
+                        'name': user_data.get('name', username),
+                        'follower_count': format_count(str(user_data.get('followers_count', 0)), 'followers'),
+                        'follower_count_exact': str(user_data.get('followers_count', 0)),
+                        'following_count': 'Hidden',
+                        'tweet_count': 'Hidden',
+                        'profile_url': f"https://twitter.com/{username}",
+                        'profile_image': f'https://unavatar.io/twitter/{username}',
+                        'bio': 'Bio unavailable via this method',
+                        'platform': 'twitter',
+                        'method': 'twitter_syndication_api'
+                    }
+        except Exception as e:
+            print(f"Syndication API failed: {e}")
+        
+        # Method 5: Check if profile exists via unavatar
         try:
             img_url = f'https://unavatar.io/twitter/{username}'
             response = requests.head(img_url, timeout=5)
@@ -276,16 +376,16 @@ def scrape_twitter_profile(username):
                     'tweet_count': 'Hidden',
                     'profile_url': f"https://twitter.com/{username}",
                     'profile_image': img_url,
-                    'bio': 'Profile exists but stats temporarily unavailable. This may be due to Twitter\'s anti-scraping measures.',
+                    'bio': 'Profile exists but detailed stats are temporarily unavailable due to Twitter\'s restrictions.',
                     'platform': 'twitter',
-                    'method': 'unavatar (profile confirmed)'
+                    'method': 'unavatar_fallback'
                 }
-        except:
-            pass
+        except Exception as e:
+            print(f"Unavatar check failed: {e}")
         
         return {
             'success': False,
-            'error': f'Could not fetch data for @{username}. The account may be private, suspended, or temporarily unavailable.'
+            'error': f'Could not fetch data for @{username}. The account may be private, suspended, or all scraping methods are currently blocked.'
         }
         
     except Exception as e:
@@ -395,7 +495,7 @@ def scrape_tiktok_profile(username):
             'error': f'Error: {str(e)}'
         }
 
-# ==================== TELEGRAM FUNCTIONS ====================
+# ==================== TELEGRAM FUNCTIONS (IMPROVED) ====================
 
 def extract_telegram_username(url):
     """Extract username from Telegram URL"""
@@ -413,7 +513,7 @@ def extract_telegram_username(url):
     return None
 
 async def scrape_telegram_profile_async(username):
-    """Scrape Telegram profile using Telethon"""
+    """Improved Telegram scraping for both users and channels/groups"""
     if not TELEGRAM_AVAILABLE or not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         return {
             'success': False,
@@ -428,50 +528,78 @@ async def scrape_telegram_profile_async(username):
         
         await client.connect()
         
-        if not await client.is_user_authorized():
-            # For bot mode, you don't need authorization
-            pass
-        
         try:
-            # Get user info
-            user = await client.get_entity(username)
-            full_user = await client(GetFullUserRequest(user.id))
+            # Get entity (could be user, channel, or group)
+            entity = await client.get_entity(username)
             
-            # Get profile photo
-            profile_photo = None
-            if user.photo:
+            # Check if it's a channel/group or user
+            is_channel = hasattr(entity, 'broadcast') or hasattr(entity, 'megagroup')
+            
+            profile_photo = f'https://unavatar.io/telegram/{username}'
+            
+            if is_channel:
+                # It's a channel or group
                 try:
-                    photo = await client.download_profile_photo(user, bytes)
-                    # Convert to base64 or use unavatar
-                    profile_photo = f'https://unavatar.io/telegram/{username}'
-                except:
-                    profile_photo = f'https://unavatar.io/telegram/{username}'
+                    full_channel = await client(GetFullChannelRequest(entity))
+                    
+                    name = entity.title
+                    member_count = full_channel.full_chat.participants_count
+                    description = full_channel.full_chat.about or ''
+                    
+                    # Determine type
+                    if entity.broadcast:
+                        entity_type = 'Channel'
+                    elif entity.megagroup:
+                        entity_type = 'Supergroup'
+                    else:
+                        entity_type = 'Group'
+                    
+                    await client.disconnect()
+                    
+                    return {
+                        'success': True,
+                        'username': entity.username or username,
+                        'name': name,
+                        'type': entity_type,
+                        'member_count': format_count(str(member_count), 'members'),
+                        'member_count_exact': str(member_count),
+                        'profile_url': f"https://t.me/{username}",
+                        'profile_image': profile_photo,
+                        'description': description,
+                        'is_verified': entity.verified if hasattr(entity, 'verified') else False,
+                        'platform': 'telegram',
+                        'method': 'telethon_api'
+                    }
+                except ChannelPrivateError:
+                    await client.disconnect()
+                    return {
+                        'success': False,
+                        'error': f'Channel/Group @{username} is private and cannot be accessed'
+                    }
             else:
-                profile_photo = f'https://unavatar.io/telegram/{username}'
-            
-            # Extract info
-            name = f"{user.first_name or ''} {user.last_name or ''}".strip() or username
-            bio = full_user.full_user.about or ''
-            
-            # Telegram doesn't provide follower counts for users
-            # Only channels/groups have member counts
-            
-            await client.disconnect()
-            
-            return {
-                'success': True,
-                'username': user.username or username,
-                'name': name,
-                'user_id': user.id,
-                'profile_url': f"https://t.me/{username}",
-                'profile_image': profile_photo,
-                'bio': bio,
-                'is_bot': user.bot,
-                'is_verified': user.verified,
-                'platform': 'telegram',
-                'method': 'telethon_api',
-                'note': 'Telegram does not provide follower counts for users'
-            }
+                # It's a user
+                full_user = await client(GetFullUserRequest(entity))
+                
+                name = f"{entity.first_name or ''} {entity.last_name or ''}".strip() or username
+                bio = full_user.full_user.about or ''
+                
+                await client.disconnect()
+                
+                return {
+                    'success': True,
+                    'username': entity.username or username,
+                    'name': name,
+                    'type': 'User',
+                    'user_id': entity.id,
+                    'profile_url': f"https://t.me/{username}",
+                    'profile_image': profile_photo,
+                    'bio': bio,
+                    'is_bot': entity.bot,
+                    'is_verified': entity.verified if hasattr(entity, 'verified') else False,
+                    'platform': 'telegram',
+                    'method': 'telethon_api',
+                    'note': 'Telegram users do not have public follower counts'
+                }
             
         except UsernameNotOccupiedError:
             await client.disconnect()
@@ -489,7 +617,7 @@ async def scrape_telegram_profile_async(username):
             await client.disconnect()
             return {
                 'success': False,
-                'error': f'Error fetching Telegram user: {str(e)}'
+                'error': f'Error fetching Telegram entity: {str(e)}'
             }
             
     except Exception as e:
@@ -636,7 +764,7 @@ def home():
     """Root endpoint"""
     return jsonify({
         'message': 'Social Media Stats API',
-        'version': '6.0',
+        'version': '7.0',
         'platforms': ['YouTube', 'Twitter/X', 'TikTok', 'Telegram'],
         'endpoints': {
             '/api/scrape': 'POST - Universal scraper',
@@ -648,9 +776,9 @@ def home():
         },
         'status': {
             'youtube': 'active' if YOUTUBE_API_KEY else 'inactive',
-            'twitter': 'active',
+            'twitter': 'active (improved multi-method)',
             'tiktok': 'active',
-            'telegram': 'active' if (TELEGRAM_API_ID and TELEGRAM_API_HASH) else 'inactive'
+            'telegram': 'active (channels + users)' if (TELEGRAM_API_ID and TELEGRAM_API_HASH) else 'inactive'
         }
     }), 200
 
