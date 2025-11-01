@@ -240,7 +240,7 @@ def scrape_twitter(username):
     return {"success": False, "error": f"@{username} not found or temporarily unavailable"}
 
 
-# ==================== INSTAGRAM – WORKING FIX ====================
+# ==================== INSTAGRAM – COMPLETE FIX WITH HD AVATAR ====================
 def extract_ig(url_or_at):
     m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", url_or_at)
     if m: return m.group(1)
@@ -251,269 +251,214 @@ def extract_ig(url_or_at):
 
 def scrape_instagram(username):
     """
-    Working Instagram scraper with multiple reliable methods
+    Complete Instagram scraper with HD profile picture extraction
     """
     username = username.lstrip("@")
-    print(f"🔍 Scraping Instagram for: {username}")
     
-    # Method 1: Direct HTML scraping (Most reliable)
+    # Method 1: Official Instagram API
+    api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+        "x-ig-app-id": "936619743392459",
+        "x-asbd-id": "129477",
+        "x-ig-www-claim": "0",
+        "x-requested-with": "XMLHttpRequest",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+    
     try:
-        print(f"📱 Trying direct HTML scraping for {username}...")
-        url = f"https://www.instagram.com/{username}/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
+        print(f"Trying Instagram API for {username}...")
+        r = requests.get(api_url, headers=headers, timeout=20)
         
-        session = requests.Session()
-        response = session.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            user = data.get("data", {}).get("user", {})
+            
+            if user:
+                followers = user.get("edge_followed_by", {}).get("count", 0)
+                following = user.get("edge_follow", {}).get("count", 0)
+                posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
+                full_name = user.get("full_name") or username
+                bio = user.get("biography") or ""
+                
+                # CRITICAL: Get HD profile picture
+                avatar = (
+                    user.get("profile_pic_url_hd") or 
+                    user.get("profile_pic_url") or 
+                    f"https://unavatar.io/instagram/{username}"
+                )
+                
+                is_verified = user.get("is_verified", False)
+                is_private = user.get("is_private", False)
+                
+                print(f"✓ Instagram API success for {username}")
+                print(f"  Avatar URL: {avatar[:100]}...")
+                
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": full_name,
+                    "follower_count": format_count(followers, "followers"),
+                    "follower_count_exact": str(followers),
+                    "following_count": format_count(following, "following"),
+                    "post_count": format_count(posts, "posts"),
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": avatar,
+                    "bio": bio[:250],
+                    "is_verified": is_verified,
+                    "is_private": is_private,
+                    "method": "instagram_api",
+                }
+    except Exception as e:
+        print(f"Instagram API failed: {e}")
+    
+    # Method 2: Web scraping with better avatar extraction
+    try:
+        print(f"Trying web scraping for {username}...")
+        web_url = f"https://www.instagram.com/{username}/"
+        r = requests.get(web_url, headers=headers, timeout=15)
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        if r.status_code == 200:
+            # Try to extract from meta tags first
+            soup = BeautifulSoup(r.text, "html.parser")
             
-            # Look for JSON data in script tags
-            scripts = soup.find_all('script', type='text/javascript')
-            for script in scripts:
-                if script.string and 'profile_pic_url_hd' in script.string:
-                    try:
-                        # Extract JSON data
-                        json_str = script.string
-                        json_str = json_str[json_str.find('{'):json_str.rfind('}')+1]
-                        data = json.loads(json_str)
-                        
-                        # Navigate to user data
-                        user_data = data.get('entry_data', {}).get('ProfilePage', [{}])[0].get('graphql', {}).get('user', {})
-                        
-                        if user_data:
-                            # Extract profile information
-                            full_name = user_data.get('full_name', username)
-                            followers = user_data.get('edge_followed_by', {}).get('count', 0)
-                            following = user_data.get('edge_follow', {}).get('count', 0)
-                            posts = user_data.get('edge_owner_to_timeline_media', {}).get('count', 0)
-                            bio = user_data.get('biography', '')
-                            is_private = user_data.get('is_private', False)
-                            is_verified = user_data.get('is_verified', False)
-                            
-                            # Get HD profile picture
-                            profile_pic = user_data.get('profile_pic_url_hd') or user_data.get('profile_pic_url')
-                            
-                            print(f"✅ Direct HTML success for {username}")
-                            return {
-                                "success": True,
-                                "platform": "instagram",
-                                "username": username,
-                                "name": full_name,
-                                "follower_count": format_count(followers, "followers"),
-                                "follower_count_exact": str(followers),
-                                "following_count": format_count(following, "following"),
-                                "post_count": format_count(posts, "posts"),
-                                "profile_url": f"https://instagram.com/{username}",
-                                "profile_image": profile_pic,
-                                "bio": bio[:250],
-                                "is_verified": is_verified,
-                                "is_private": is_private,
-                                "method": "instagram_direct",
-                            }
-                    except Exception as e:
-                        print(f"❌ JSON parsing failed: {e}")
-                        continue
+            # Get avatar from og:image (usually HD)
+            og_img = soup.find("meta", property="og:image")
+            avatar = f"https://unavatar.io/instagram/{username}"
             
-            # Fallback: Meta tag extraction
-            print("🔄 Falling back to meta tag extraction...")
-            meta_description = soup.find('meta', property='og:description')
-            if meta_description:
-                description = meta_description.get('content', '')
+            if og_img and og_img.get("content"):
+                img_url = og_img["content"]
+                # Instagram og:image is usually high quality
+                if img_url.startswith("http"):
+                    avatar = img_url
+                    print(f"✓ Found avatar from og:image: {avatar[:80]}...")
+            
+            # Try JSON-LD data
+            json_ld = soup.find("script", {"type": "application/ld+json"})
+            if json_ld:
+                try:
+                    ld_data = json.loads(json_ld.string)
+                    name = ld_data.get("name", username)
+                    
+                    # Sometimes profile image is in JSON-LD
+                    if "image" in ld_data and ld_data["image"].startswith("http"):
+                        avatar = ld_data["image"]
+                        print(f"✓ Found avatar from JSON-LD: {avatar[:80]}...")
+                except:
+                    pass
+            
+            # Extract stats from meta description
+            meta = soup.find("meta", property="og:description")
+            if meta:
+                txt = meta.get("content", "")
+                name_match = re.search(r"^([^-(]+)", txt)
+                name = name_match.group(1).strip() if name_match else username
                 
-                # Extract counts from description
-                followers_match = re.search(r'([\d,]+) Followers', description)
-                following_match = re.search(r'([\d,]+) Following', description)
-                posts_match = re.search(r'([\d,]+) Posts', description)
+                followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", txt, re.I)
+                following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", txt, re.I)
+                posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", txt, re.I)
                 
-                followers = parse_count(followers_match.group(1)) if followers_match else 0
-                following = parse_count(following_match.group(1)) if following_match else 0
-                posts = parse_count(posts_match.group(1)) if posts_match else 0
+                bio_match = re.search(r"-\s*(.+?)(?:\s*See Instagram|$)", txt)
+                bio = bio_match.group(1).strip()[:250] if bio_match else ""
                 
-                # Extract name from title
-                title = soup.find('title')
-                name = username
-                if title:
-                    title_text = title.get_text()
-                    name_match = re.search(r'\(@([^)]+)\)', title_text)
-                    if name_match:
-                        name = title_text.split('(')[0].strip()
-                
-                # Get profile picture from meta
-                meta_image = soup.find('meta', property='og:image')
-                profile_pic = meta_image.get('content') if meta_image else f"https://unavatar.io/instagram/{username}"
-                
-                if followers > 0:
-                    print(f"✅ Meta tag success for {username}")
+                if followers_match or posts_match:
+                    print(f"✓ Web scraping success for {username}")
                     return {
                         "success": True,
                         "platform": "instagram",
                         "username": username,
                         "name": name,
-                        "follower_count": format_count(followers, "followers"),
-                        "follower_count_exact": str(followers),
-                        "following_count": format_count(following, "following"),
-                        "post_count": format_count(posts, "posts"),
+                        "follower_count": format_count(parse_count(followers_match.group(1)), "followers") if followers_match else "Hidden",
+                        "follower_count_exact": str(parse_count(followers_match.group(1))) if followers_match else "0",
+                        "following_count": format_count(parse_count(following_match.group(1)), "following") if following_match else "Hidden",
+                        "post_count": format_count(parse_count(posts_match.group(1)), "posts") if posts_match else "Hidden",
                         "profile_url": f"https://instagram.com/{username}",
-                        "profile_image": profile_pic,
-                        "bio": "",
-                        "is_verified": False,
-                        "is_private": False,
-                        "method": "instagram_meta",
+                        "profile_image": avatar,
+                        "bio": bio,
+                        "method": "instagram_web",
                     }
-                    
     except Exception as e:
-        print(f"❌ Direct HTML scraping failed: {e}")
+        print(f"Web scraping failed: {e}")
     
-    # Method 2: Alternative Instagram viewers
+    # Method 3: Try alternative Instagram viewer services
     try:
-        print(f"🌐 Trying Picuki for {username}...")
-        picuki_url = f"https://www.picuki.com/profile/{username}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        response = requests.get(picuki_url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract profile info
-            profile_name = soup.find('div', class_='profile-name')
-            name = profile_name.get_text(strip=True) if profile_name else username
-            
-            # Extract profile picture
-            profile_avatar = soup.find('img', class_='profile-avatar')
-            profile_pic = profile_avatar.get('src') if profile_avatar else f"https://unavatar.io/instagram/{username}"
-            
-            # Extract statistics
-            stats = {}
-            stat_elements = soup.find_all('div', class_='profile-stat')
-            for stat in stat_elements:
-                title_elem = stat.find('div', class_='profile-stat-title')
-                value_elem = stat.find('div', class_='profile-stat-num')
-                if title_elem and value_elem:
-                    stat_name = title_elem.get_text(strip=True).lower()
-                    stat_value = value_elem.get_text(strip=True)
-                    stats[stat_name] = stat_value
-            
-            followers = parse_count(stats.get('followers', '0'))
-            following = parse_count(stats.get('following', '0'))
-            posts = parse_count(stats.get('posts', '0'))
-            
-            if followers > 0:
-                print(f"✅ Picuki success for {username}")
-                return {
-                    "success": True,
-                    "platform": "instagram",
-                    "username": username,
-                    "name": name,
-                    "follower_count": format_count(followers, "followers"),
-                    "follower_count_exact": str(followers),
-                    "following_count": format_count(following, "following"),
-                    "post_count": format_count(posts, "posts"),
-                    "profile_url": f"https://instagram.com/{username}",
-                    "profile_image": profile_pic,
-                    "bio": "",
-                    "is_verified": False,
-                    "is_private": False,
-                    "method": "picuki",
-                }
-                
-    except Exception as e:
-        print(f"❌ Picuki failed: {e}")
-    
-    # Method 3: Imginn
-    try:
-        print(f"🖼️ Trying Imginn for {username}...")
+        print(f"Trying Imginn for {username}...")
         imginn_url = f"https://imginn.com/{username}/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        r = requests.get(imginn_url, headers={"User-Agent": headers["User-Agent"]}, timeout=15)
         
-        response = requests.get(imginn_url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
             
-            # Extract profile picture
-            avatar_img = soup.find('img', class_='avatar')
-            profile_pic = avatar_img.get('src') if avatar_img else f"https://unavatar.io/instagram/{username}"
+            # Get avatar
+            avatar_img = soup.find("img", class_=lambda x: x and "avatar" in x.lower()) or soup.find("img", alt=lambda x: x and username in str(x).lower())
+            avatar = f"https://unavatar.io/instagram/{username}"
             
-            # Extract name
-            name_elem = soup.find('h1') or soup.find('title')
-            name = username
+            if avatar_img and avatar_img.get("src"):
+                src = avatar_img["src"]
+                if src.startswith("http"):
+                    avatar = src
+                    print(f"✓ Found avatar from Imginn: {avatar[:80]}...")
+            
+            # Get stats
+            name = username.title()
+            name_elem = soup.find("h1") or soup.find("h2")
             if name_elem:
-                name_text = name_elem.get_text(strip=True)
-                if name_text and len(name_text) < 50:
-                    name = name_text.replace('@' + username, '').strip()
+                name = name_elem.get_text(strip=True)
             
-            # Extract stats from page text
-            page_text = soup.get_text()
-            followers_match = re.search(r'(\d+[KM]?)\s+Followers', page_text)
-            following_match = re.search(r'(\d+[KM]?)\s+Following', page_text)
-            posts_match = re.search(r'(\d+[KM]?)\s+Posts', page_text)
+            stats_text = soup.get_text()
+            followers_match = re.search(r"([\d,.]+[KMB]?)\s*(?:Followers?|followers?)", stats_text)
+            following_match = re.search(r"([\d,.]+[KMB]?)\s*(?:Following|following)", stats_text)
+            posts_match = re.search(r"([\d,.]+[KMB]?)\s*(?:Posts?|posts?)", stats_text)
             
-            followers = parse_count(followers_match.group(1)) if followers_match else 0
-            following = parse_count(following_match.group(1)) if following_match else 0
-            posts = parse_count(posts_match.group(1)) if posts_match else 0
-            
-            if followers > 0:
-                print(f"✅ Imginn success for {username}")
+            if followers_match or avatar.startswith("http"):
+                print(f"✓ Imginn success for {username}")
                 return {
                     "success": True,
                     "platform": "instagram",
                     "username": username,
                     "name": name,
-                    "follower_count": format_count(followers, "followers"),
-                    "follower_count_exact": str(followers),
-                    "following_count": format_count(following, "following"),
-                    "post_count": format_count(posts, "posts"),
+                    "follower_count": format_count(parse_count(followers_match.group(1)), "followers") if followers_match else "Hidden",
+                    "follower_count_exact": str(parse_count(followers_match.group(1))) if followers_match else "0",
+                    "following_count": format_count(parse_count(following_match.group(1)), "following") if following_match else "Hidden",
+                    "post_count": format_count(parse_count(posts_match.group(1)), "posts") if posts_match else "Hidden",
                     "profile_url": f"https://instagram.com/{username}",
-                    "profile_image": profile_pic,
+                    "profile_image": avatar,
                     "bio": "",
-                    "is_verified": False,
-                    "is_private": False,
                     "method": "imginn",
                 }
-                
     except Exception as e:
-        print(f"❌ Imginn failed: {e}")
+        print(f"Imginn failed: {e}")
     
-    # Final fallback
+    # Final fallback: unavatar
     try:
-        print("🔄 Trying unavatar fallback...")
         unavatar_url = f"https://unavatar.io/instagram/{username}"
-        response = requests.head(unavatar_url, timeout=5)
-        if response.status_code == 200:
-            print(f"✅ Unavatar fallback for {username}")
+        if requests.head(unavatar_url, timeout=5).status_code == 200:
             return {
                 "success": True,
                 "platform": "instagram",
                 "username": username,
-                "name": username.replace('_', ' ').title(),
+                "name": username.replace("_", " ").replace(".", " ").title(),
                 "follower_count": "Hidden",
                 "follower_count_exact": "0",
                 "following_count": "Hidden",
                 "post_count": "Hidden",
                 "profile_url": f"https://instagram.com/{username}",
                 "profile_image": unavatar_url,
-                "bio": "Profile exists but detailed stats are unavailable.",
-                "is_verified": False,
-                "is_private": False,
+                "bio": "Profile exists. Instagram requires login for detailed stats.",
                 "method": "unavatar",
             }
-    except Exception as e:
-        print(f"❌ Unavatar failed: {e}")
+    except:
+        pass
     
     return {
         "success": False,
-        "error": f"Unable to fetch Instagram profile for @{username}. Profile may be private or not exist."
+        "error": f"Cannot access @{username}. Profile may be private or Instagram is blocking requests."
     }
 
 
@@ -651,7 +596,7 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK – WORKING FIX ====================
+# ==================== FACEBOOK – COMPLETE REWRITE ====================
 def extract_fb(url_or_at):
     url_lower = url_or_at.lower()
     m = re.search(r"facebook\.com/groups/(\d+)", url_or_at, re.I)
@@ -671,115 +616,233 @@ def extract_fb(url_or_at):
 
 def scrape_facebook(identifier, entity_type="page"):
     """
-    Working Facebook scraper with reliable methods
+    Complete Facebook scraper using mbasic (most reliable)
     """
-    identifier = identifier.lstrip("@")
-    print(f"🔍 Scraping Facebook for: {identifier} ({entity_type})")
-    
     base_url = f"https://www.facebook.com/{identifier}" if entity_type == "page" else f"https://www.facebook.com/groups/{identifier}"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    }
-    
     session = requests.Session()
-    session.headers.update(headers)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    })
     
-    # Method 1: Direct page access with meta tags
+    # Strategy 1: mbasic (MOST RELIABLE)
     try:
-        print(f"🌐 Trying direct Facebook access for {identifier}...")
-        response = session.get(base_url, timeout=15, allow_redirects=True)
+        print(f"Trying mbasic.facebook.com for {identifier}...")
+        mbasic_url = base_url.replace("www.facebook.com", "mbasic.facebook.com").replace("facebook.com", "mbasic.facebook.com")
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        r = session.get(mbasic_url, timeout=20, allow_redirects=True)
+        
+        if r.status_code == 200 and "login" not in r.url.lower():
+            html = r.text
+            soup = BeautifulSoup(html, "html.parser")
             
-            # Extract from meta tags
-            meta_title = soup.find('meta', property='og:title')
-            meta_image = soup.find('meta', property='og:image')
-            meta_description = soup.find('meta', property='og:description')
+            # Extract name
+            name = identifier.replace("_", " ").replace("-", " ").title()
             
-            name = identifier.replace('_', ' ').title()
-            if meta_title and meta_title.get('content'):
-                title_content = meta_title.get('content')
-                # Clean up title
-                name = re.sub(r'\s*[|-]\s*Facebook$', '', title_content, flags=re.IGNORECASE).strip()
+            # Try multiple name sources
+            title_tag = soup.find("title")
+            if title_tag:
+                title_text = title_tag.get_text(strip=True)
+                if title_text and len(title_text) < 100 and "facebook" not in title_text.lower():
+                    name = title_text
             
-            profile_pic = f"https://unavatar.io/facebook/{identifier}"
-            if meta_image and meta_image.get('content'):
-                profile_pic = meta_image.get('content')
+            # Get from page header
+            header_div = soup.find("div", {"id": "m-timeline-cover-section"})
+            if header_div:
+                h_tag = header_div.find(["h1", "h2", "h3"])
+                if h_tag:
+                    name = h_tag.get_text(strip=True)
             
+            # Extract profile picture
+            avatar = f"https://unavatar.io/facebook/{identifier}"
+            
+            # Look for profile image in various places
+            profile_pic = soup.find("img", alt=lambda x: x and (name.lower() in str(x).lower() or "profile picture" in str(x).lower()))
+            if profile_pic and profile_pic.get("src"):
+                src = profile_pic["src"]
+                if src.startswith("http"):
+                    avatar = src
+                    print(f"✓ Found avatar from mbasic img: {avatar[:80]}...")
+            
+            # Extract follower/member count
+            is_group = entity_type == "group" or "/groups/" in r.url
+            count = "Hidden"
+            count_exact = "0"
+            count_label = ""
+            
+            # Comprehensive patterns for mbasic
+            patterns = [
+                (r'([\d,]+)\s+people\s+(?:like|follow)\s+this', 'followers'),
+                (r'([\d,]+[KMB]?)\s+people\s+(?:like|follow)\s+this', 'followers'),
+                (r'([\d,]+)\s+(?:members?|likes?|followers?)', 'members' if is_group else 'followers'),
+                (r'([\d,]+[KMB]?)\s+(?:members?|likes?|followers?)', 'members' if is_group else 'followers'),
+                (r'>([\d,]+)<.*?(?:member|like|follow)', 'members' if is_group else 'followers'),
+            ]
+            
+            for pattern, label_type in patterns:
+                matches = re.findall(pattern, html, re.I | re.DOTALL)
+                if matches:
+                    for match in matches:
+                        parsed = parse_count(str(match).replace(",", ""))
+                        if parsed >= 10:  # Filter noise
+                            count_exact = str(parsed)
+                            count = format_count(parsed, label_type)
+                            count_label = label_type
+                            print(f"✓ Found count: {count} ({label_type})")
+                            break
+                if count != "Hidden":
+                    break
+            
+            # Extract bio/description
             bio = ""
-            if meta_description and meta_description.get('content'):
-                bio = meta_description.get('content')[:250]
+            about_div = soup.find("div", {"id": "about_basics"})
+            if about_div:
+                bio = about_div.get_text(strip=True)[:250]
             
-            # Try to extract likes/followers from page text
-            page_text = soup.get_text()
-            likes_match = re.search(r'(\d+(?:,\d+)*)\s*(?:people\s+)?like\s+this', page_text, re.IGNORECASE)
-            followers_match = re.search(r'(\d+(?:,\d+)*)\s*(?:people\s+)?follow\s+this', page_text, re.IGNORECASE)
-            members_match = re.search(r'(\d+(?:,\d+)*)\s*members', page_text, re.IGNORECASE)
-            
-            count = 0
-            count_label = "likes"
-            
-            if likes_match:
-                count = parse_count(likes_match.group(1))
-                count_label = "likes"
-            elif followers_match:
-                count = parse_count(followers_match.group(1))
-                count_label = "followers"
-            elif members_match:
-                count = parse_count(members_match.group(1))
-                count_label = "members"
-            
-            if name != identifier.replace('_', ' ').title() or count > 0:
-                print(f"✅ Direct Facebook success for {identifier}")
+            if count != "Hidden" or name != identifier.replace("_", " ").title():
+                print(f"✓ mbasic success for {identifier}")
                 return {
                     "success": True,
                     "platform": "facebook",
                     "username": identifier,
                     "name": name,
-                    "type": "Group" if entity_type == "group" else "Page",
-                    "count": format_count(count, count_label),
-                    "count_exact": str(count),
+                    "type": "Group" if is_group else "Page",
+                    "count": count,
+                    "count_exact": count_exact,
                     "count_label": count_label,
                     "profile_url": base_url,
-                    "profile_image": profile_pic,
-                    "bio": bio,
-                    "method": "facebook_direct",
+                    "profile_image": avatar,
+                    "bio": bio or "Facebook Page/Group",
+                    "method": "facebook_mbasic",
                 }
-                
     except Exception as e:
-        print(f"❌ Direct Facebook access failed: {e}")
+        print(f"mbasic failed: {e}")
     
-    # Method 2: Mobile Facebook
+    # Strategy 2: Desktop with better extraction
     try:
-        print(f"📱 Trying mobile Facebook for {identifier}...")
-        mobile_url = base_url.replace('www.facebook.com', 'm.facebook.com')
-        response = session.get(mobile_url, timeout=15)
+        print(f"Trying desktop facebook.com for {identifier}...")
+        r = session.get(base_url, timeout=20, allow_redirects=True)
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        if r.status_code == 200 and "login" not in r.url.lower():
+            html = r.text
+            soup = BeautifulSoup(html, "html.parser")
             
-            # Extract name from title
-            title = soup.find('title')
-            name = identifier.replace('_', ' ').title()
-            if title:
-                title_text = title.get_text(strip=True)
-                if title_text and 'facebook' not in title_text.lower():
+            # Name extraction
+            name = identifier.replace("_", " ").replace("-", " ").title()
+            
+            og_title = soup.find("meta", property="og:title")
+            if og_title and og_title.get("content"):
+                title_text = og_title["content"]
+                title_text = re.sub(r"\s*[-|]\s*Facebook$", "", title_text, flags=re.I)
+                if title_text and "facebook" not in title_text.lower():
                     name = title_text
             
-            # Extract profile picture
-            profile_img = soup.find('img', src=lambda x: x and 'scontent' in x)
-            profile_pic = profile_img.get('src') if profile_img else f"https://unavatar.io/facebook/{identifier}"
+            # Avatar extraction
+            avatar = f"https://unavatar.io/facebook/{identifier}"
             
-            # Extract basic info from page text
-            page_text = soup.get_text()
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content"):
+                img_url = og_img["content"]
+                if img_url.startswith("http"):
+                    avatar = img_url
+                    print(f"✓ Found avatar from og:image: {avatar[:80]}...")
             
-            print(f"✅ Mobile Facebook success for {identifier}")
+            # Try to find profile image in the page
+            if avatar == f"https://unavatar.io/facebook/{identifier}":
+                img_tags = soup.find_all("img", src=lambda x: x and "scontent" in str(x))
+                for img in img_tags:
+                    src = img.get("src")
+                    if src and src.startswith("http") and "scontent" in src:
+                        avatar = src
+                        print(f"✓ Found avatar from scontent img: {avatar[:80]}...")
+                        break
+            
+            # Stats extraction
+            is_group = entity_type == "group" or "/groups/" in r.url
+            count = "Hidden"
+            count_exact = "0"
+            count_label = ""
+            
+            # Desktop patterns
+            patterns = [
+                r'"follower_count":(\d+)',
+                r'"member_count":(\d+)',
+                r'([\d,]+[KMB]?)\s+(?:people\s+)?(?:like|follow)\s+this',
+                r'([\d,]+)\s+(?:followers?|likes?|members?)',
+                r'"subscriberCountText":"([^"]+)"',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, html, re.I)
+                for match in matches:
+                    parsed = parse_count(str(match).replace(",", ""))
+                    if parsed >= 10:
+                        count_exact = str(parsed)
+                        if is_group:
+                            count = format_count(parsed, "members")
+                            count_label = "members"
+                        else:
+                            count = format_count(parsed, "followers")
+                            count_label = "followers"
+                        print(f"✓ Found count from desktop: {count}")
+                        break
+                if count != "Hidden":
+                    break
+            
+            # Bio
+            bio = ""
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc:
+                bio = og_desc.get("content", "")
+                bio = re.sub(r'\d+(?:,\d{3})*\s+(?:people\s+)?(?:like|follow).*', '', bio, flags=re.I)
+                bio = bio.strip()[:250]
+            
+            if count != "Hidden" or name != identifier.replace("_", " ").title():
+                print(f"✓ Desktop success for {identifier}")
+                return {
+                    "success": True,
+                    "platform": "facebook",
+                    "username": identifier,
+                    "name": name,
+                    "type": "Group" if is_group else "Page",
+                    "count": count,
+                    "count_exact": count_exact,
+                    "count_label": count_label,
+                    "profile_url": base_url,
+                    "profile_image": avatar,
+                    "bio": bio or "Facebook Page/Group",
+                    "method": "facebook_desktop",
+                }
+    except Exception as e:
+        print(f"Desktop failed: {e}")
+    
+    # Strategy 3: Mobile fallback
+    try:
+        print(f"Trying m.facebook.com for {identifier}...")
+        mobile_url = base_url.replace("www.facebook.com", "m.facebook.com").replace("facebook.com", "m.facebook.com")
+        
+        r = session.get(mobile_url, timeout=15)
+        
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            
+            name = identifier.replace("_", " ").replace("-", " ").title()
+            h_tags = soup.find_all(["h1", "h2", "h3"])
+            for h in h_tags:
+                text = h.get_text(strip=True)
+                if len(text) > 3 and len(text) < 100:
+                    name = text
+                    break
+            
+            avatar = f"https://unavatar.io/facebook/{identifier}"
+            img = soup.find("img", alt=lambda x: x and name.lower() in str(x).lower())
+            if img and img.get("src") and img["src"].startswith("http"):
+                avatar = img["src"]
+                print(f"✓ Found avatar from mobile: {avatar[:80]}...")
+            
             return {
                 "success": True,
                 "platform": "facebook",
@@ -788,81 +851,39 @@ def scrape_facebook(identifier, entity_type="page"):
                 "type": "Group" if entity_type == "group" else "Page",
                 "count": "Hidden",
                 "count_exact": "0",
-                "count_label": "likes",
+                "count_label": "",
                 "profile_url": base_url,
-                "profile_image": profile_pic,
-                "bio": "Limited information available from mobile view",
+                "profile_image": avatar,
+                "bio": "Limited info from mobile view",
                 "method": "facebook_mobile",
             }
-            
     except Exception as e:
-        print(f"❌ Mobile Facebook failed: {e}")
+        print(f"Mobile failed: {e}")
     
-    # Method 3: Public profile search
+    # Final fallback
     try:
-        print(f"🔎 Trying public profile search for {identifier}...")
-        search_url = f"https://www.facebook.com/public/{identifier}"
-        response = session.get(search_url, timeout=15)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Look for profile cards
-            profile_cards = soup.find_all('div', class_='_4bl9')
-            for card in profile_cards:
-                link = card.find('a')
-                if link and identifier.lower() in link.get('href', '').lower():
-                    name_elem = card.find('div', class_='_2pit')
-                    if name_elem:
-                        name = name_elem.get_text(strip=True)
-                        profile_pic = f"https://unavatar.io/facebook/{identifier}"
-                        
-                        print(f"✅ Public search success for {identifier}")
-                        return {
-                            "success": True,
-                            "platform": "facebook",
-                            "username": identifier,
-                            "name": name,
-                            "type": "Page",
-                            "count": "Hidden",
-                            "count_exact": "0",
-                            "count_label": "likes",
-                            "profile_url": base_url,
-                            "profile_image": profile_pic,
-                            "bio": "Profile found via public search",
-                            "method": "facebook_public",
-                        }
-                        
-    except Exception as e:
-        print(f"❌ Public search failed: {e}")
-    
-    # Final fallback with unavatar
-    try:
-        print("🔄 Trying unavatar fallback...")
-        unavatar_url = f"https://unavatar.io/facebook/{identifier}"
-        response = requests.head(unavatar_url, timeout=5)
-        if response.status_code == 200:
-            print(f"✅ Unavatar fallback for {identifier}")
+        if requests.head(f"https://unavatar.io/facebook/{identifier}", timeout=5).status_code == 200:
             return {
                 "success": True,
                 "platform": "facebook",
                 "username": identifier,
-                "name": identifier.replace('_', ' ').title(),
+                "name": identifier.replace("_", " ").replace("-", " ").title(),
                 "type": "Group" if entity_type == "group" else "Page",
                 "count": "Hidden",
                 "count_exact": "0",
-                "count_label": "likes",
+                "count_label": "",
                 "profile_url": base_url,
-                "profile_image": unavatar_url,
-                "bio": "Profile exists but detailed stats are unavailable.",
+                "profile_image": f"https://unavatar.io/facebook/{identifier}",
+                "bio": "Profile exists. Facebook requires login for detailed statistics.",
                 "method": "unavatar",
+                "note": "Facebook restricts public access. Consider using Facebook Graph API."
             }
-    except Exception as e:
-        print(f"❌ Unavatar failed: {e}")
+    except:
+        pass
     
     return {
         "success": False,
-        "error": f"Unable to fetch Facebook {entity_type} for {identifier}. Profile may be private or not exist."
+        "error": f"Cannot access Facebook {entity_type}: {identifier}. May be private or require login."
     }
 
 
@@ -979,21 +1000,21 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "17.0 - Instagram & Facebook WORKING FIX",
+        "version": "15.0 - Instagram & Facebook FIXED",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
             "/api/twitter": "POST – Twitter/X",
-            "/api/instagram": "POST – Instagram (multiple reliable methods)",
+            "/api/instagram": "POST – Instagram (HD avatar + multiple methods)",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram (real photo)",
-            "/api/facebook": "POST – Facebook (multiple reliable methods)",
+            "/api/facebook": "POST – Facebook (real name & avatar + mbasic)",
             "/api/health": "GET – health check",
         },
         "notes": {
-            "instagram": "Uses direct HTML scraping + Picuki + Imginn for reliable results",
-            "facebook": "Uses direct access + mobile + public search for best coverage"
+            "instagram": "Uses official API + web scraping + Imginn for HD profile pictures",
+            "facebook": "Uses mbasic.facebook.com for best success rate + real avatar extraction"
         }
     })
 
