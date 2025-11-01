@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py  –  Social-Media Stats API (Flask + Telethon + FB Groups)
+# app.py  –  Social-Media Stats API (Flask + Telethon + FB Groups/Pages)
 # --------------------------------------------------------------
 
 import os
@@ -379,7 +379,7 @@ def scrape_telegram(username):
     return asyncio.run(_tg_async(username.lstrip("@")))
 
 
-# ==================== FACEBOOK (Groups + Pages) ====================
+# ==================== FACEBOOK (Groups + Pages) – FIXED ====================
 def extract_fb(url_or_at):
     """Extract identifier from any Facebook URL (profile, page, group)"""
     patterns = [
@@ -397,7 +397,7 @@ def extract_fb(url_or_at):
 
 
 def scrape_facebook(identifier):
-    """Scrape Facebook Page or Group (public only)"""
+    """Scrape Facebook Page or Group (public only) – FIXED LOGIC"""
     url = f"https://www.facebook.com/{identifier}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -416,29 +416,39 @@ def scrape_facebook(identifier):
         raw_title = title_tag.get_text(strip=True) if title_tag else ""
         name = re.sub(r"\s*[-|·]\s*Facebook$", "", raw_title).strip()
 
-        # Detect if it's a group
-        is_group = "/groups/" in url or bool(re.search(r"member", text, re.I))
+        # --- CRITICAL FIX: Accurate Group vs Page Detection ---
+        is_group = "/groups/" in url
 
-        # Extract count
+        # Heuristic: If URL has /groups/, it's a group. Otherwise, it's a Page.
+        # We no longer rely on "member" in text — too many false positives.
+
         count = "Hidden"
         count_exact = "0"
+        count_label = ""
 
         if is_group:
-            # Look for "members"
+            # Group: Look for "X members"
             m = re.search(r"([\d,]+)\s+members?", text, re.I)
             if m:
                 count_exact = m.group(1).replace(",", "")
                 count = format_count(count_exact, "members")
+            count_label = "members"
             entity_type = "Group"
         else:
-            # Look for followers or likes
-            m = re.search(r"([\d,]+)\s+(?:followers|people like this)", text, re.I)
-            if m:
-                count_exact = m.group(1).replace(",", "")
+            # Page: Look for "X followers" or "X likes"
+            m_followers = re.search(r"([\d,]+)\s+followers?", text, re.I)
+            m_likes = re.search(r"([\d,]+)\s+(?:people like this|likes)", text, re.I)
+            if m_followers:
+                count_exact = m_followers.group(1).replace(",", "")
                 count = format_count(count_exact, "followers")
+                count_label = "followers"
+            elif m_likes:
+                count_exact = m_likes.group(1).replace(",", "")
+                count = format_count(count_exact, "likes")
+                count_label = "likes"
             entity_type = "Page"
 
-        # Profile image via unavatar or meta tag
+        # Profile image
         img_url = f"https://unavatar.io/facebook/{identifier}"
         meta_img = soup.find("meta", property="og:image")
         if meta_img and meta_img.get("content"):
@@ -450,8 +460,9 @@ def scrape_facebook(identifier):
             "username": identifier,
             "name": name or identifier,
             "type": entity_type,
-            "follower_count": count,
-            "follower_count_exact": count_exact,
+            "count": count,                    # ← Generic count
+            "count_exact": count_exact,
+            "count_label": count_label,        # ← "members", "followers", or "likes"
             "profile_url": url,
             "profile_image": img_url,
             "bio": "Facebook scraping is limited. Login required for full details.",
@@ -462,7 +473,7 @@ def scrape_facebook(identifier):
     except Exception as e:
         print(f"FB scrape failed for {identifier}: {e}")
 
-    # Fallback: confirm existence
+    # Fallback
     try:
         if requests.head(f"https://unavatar.io/facebook/{identifier}", timeout=5).status_code == 200:
             return {
@@ -471,7 +482,8 @@ def scrape_facebook(identifier):
                 "username": identifier,
                 "name": identifier,
                 "type": "Unknown",
-                "follower_count": "Hidden",
+                "count": "Hidden",
+                "count_label": "",
                 "profile_url": f"https://www.facebook.com/{identifier}",
                 "profile_image": f"https://unavatar.io/facebook/{identifier}",
                 "bio": "Stats require login",
@@ -526,7 +538,7 @@ def universal_scrape():
             return jsonify({"success": False, "error": "Invalid Telegram handle"}), 400
         return jsonify(scrape_telegram(user))
 
-    # Facebook (Page or Group)
+    # Facebook
     if "facebook.com" in url or "fb.com" in url:
         ident = extract_fb(url)
         if not ident:
@@ -599,7 +611,7 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "9.1",
+        "version": "9.2",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
