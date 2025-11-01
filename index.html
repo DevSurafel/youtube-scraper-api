@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Channel Scraper</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+            text-align: center;
+        }
+
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 0.95em;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .loader {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .loader.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .result {
+            display: none;
+            margin-top: 30px;
+            padding: 25px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border-radius: 15px;
+            animation: slideIn 0.5s ease;
+        }
+
+        .result.active {
+            display: block;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .result-item {
+            margin-bottom: 15px;
+        }
+
+        .result-label {
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 5px;
+        }
+
+        .result-value {
+            font-size: 1.2em;
+            color: #333;
+            word-break: break-word;
+        }
+
+        .error {
+            display: none;
+            margin-top: 20px;
+            padding: 15px;
+            background: #fee;
+            border-left: 4px solid #f44;
+            border-radius: 8px;
+            color: #c33;
+        }
+
+        .error.active {
+            display: block;
+        }
+
+        .example {
+            margin-top: 15px;
+            padding: 12px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .example strong {
+            color: #333;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🎥 YouTube Channel Scraper</h1>
+        <p class="subtitle">Get channel name and subscriber count instantly</p>
+
+        <div class="input-group">
+            <label for="channelUrl">YouTube Channel URL</label>
+            <input type="text" id="channelUrl" placeholder="https://www.youtube.com/@channelname">
+            <div class="example">
+                <strong>Examples:</strong><br>
+                • https://www.youtube.com/@MrBeast<br>
+                • https://www.youtube.com/c/TechChannel<br>
+                • https://www.youtube.com/channel/UC...
+            </div>
+        </div>
+
+        <button class="btn" id="scrapeBtn" onclick="scrapeChannel()">
+            Scrape Channel
+        </button>
+
+        <div class="loader" id="loader">
+            <div class="spinner"></div>
+            <p style="margin-top: 10px; color: #667eea;">Fetching channel data...</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="result" id="result">
+            <div class="result-item">
+                <div class="result-label">📺 Channel Name</div>
+                <div class="result-value" id="channelName"></div>
+            </div>
+            <div class="result-item">
+                <div class="result-label">👥 Subscribers</div>
+                <div class="result-value" id="subscriberCount"></div>
+            </div>
+            <div class="result-item">
+                <div class="result-label">🔗 Channel URL</div>
+                <div class="result-value" id="channelUrlResult"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // IMPORTANT: Update this to your deployed backend API URL
+        // For local testing use: http://localhost:5000/api/scrape
+        // For production use: https://your-backend-url.com/api/scrape
+        const API_URL = 'https://youtube-scraper-api-5nft.onrender.com/api/scrape';
+
+        async function scrapeChannel() {
+            const urlInput = document.getElementById('channelUrl');
+            const url = urlInput.value.trim();
+
+            const loader = document.getElementById('loader');
+            const result = document.getElementById('result');
+            const error = document.getElementById('error');
+            const btn = document.getElementById('scrapeBtn');
+
+            // Reset previous results
+            result.classList.remove('active');
+            error.classList.remove('active');
+
+            // Validate input
+            if (!url) {
+                showError('Please enter a YouTube channel URL');
+                return;
+            }
+
+            // Show loader
+            loader.classList.add('active');
+            btn.disabled = true;
+            btn.textContent = 'Scraping...';
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // Display results
+                    document.getElementById('channelName').textContent = data.channel_name;
+                    document.getElementById('subscriberCount').textContent = data.subscriber_count;
+                    document.getElementById('channelUrlResult').textContent = data.channel_url;
+                    result.classList.add('active');
+                } else {
+                    showError(data.error || 'Failed to scrape channel');
+                }
+
+            } catch (err) {
+                showError('Error connecting to server. Make sure the backend is running on http://localhost:5000');
+                console.error(err);
+            } finally {
+                loader.classList.remove('active');
+                btn.disabled = false;
+                btn.textContent = 'Scrape Channel';
+            }
+        }
+
+        function showError(message) {
+            const error = document.getElementById('error');
+            error.textContent = message;
+            error.classList.add('active');
+        }
+
+        // Allow Enter key to submit
+        document.getElementById('channelUrl').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                scrapeChannel();
+            }
+        });
+    </script>
+</body>
+
+</html>
