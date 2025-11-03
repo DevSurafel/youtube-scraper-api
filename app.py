@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v23 (TWITTER AVATAR FIXED)
+# app.py – Social-Media Stats API v24 (TWITTER AVATAR PROXY FIX)
 # --------------------------------------------------------------
 
 import os
@@ -9,7 +9,7 @@ import asyncio
 import base64
 import random
 from functools import wraps
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -87,6 +87,43 @@ def check_verification_code(text, code):
     return code.upper() in text.upper()
 
 
+# ==================== IMAGE PROXY ====================
+@app.route("/api/proxy-image", methods=["GET"])
+def proxy_image():
+    """Proxy images to avoid CORS issues"""
+    url = request.args.get("url")
+    if not url:
+        return jsonify({"error": "Missing url parameter"}), 400
+    
+    try:
+        # Fetch image from the original URL
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": url.split("/pic/")[0] if "/pic/" in url else url,
+        }
+        
+        r = requests.get(url, headers=headers, timeout=10, stream=True)
+        
+        if r.status_code != 200:
+            return jsonify({"error": "Failed to fetch image"}), r.status_code
+        
+        # Get content type
+        content_type = r.headers.get('Content-Type', 'image/jpeg')
+        
+        # Return the image with proper headers
+        return Response(
+            r.content,
+            mimetype=content_type,
+            headers={
+                'Cache-Control': 'public, max-age=86400',  # Cache for 24 hours
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
+    except Exception as e:
+        print(f"[Proxy] Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== YOUTUBE ====================
 def extract_yt(url):
     m = re.search(r"youtube\.com/channel/(UC[\w-]+)", url)
@@ -148,15 +185,13 @@ def yt_by_handle(handle, verification_code=None):
     return yt_by_id(cid, verification_code)
 
 
-# ==================== TWITTER (AVATAR FIXED) ====================
-# 30+ healthy Nitter instances (updated Nov 2025)
+# ==================== TWITTER (AVATAR PROXY FIX) ====================
 NITTER_INSTANCES = [
     "https://nitter.lucabased.xyz",
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
 ]
 
-# Random User-Agents (desktop browsers)
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
@@ -186,18 +221,15 @@ def scrape_twitter(username, verification_code=None):
     if not username:
         return {"success": False, "error": "Empty username"}
 
-    # Shuffle instances for every new request
     instances = NITTER_INSTANCES.copy()
     random.shuffle(instances)
 
-    # Try each instance
     for base in instances:
         try:
             url = f"{base}/{username}"
             print(f"[Twitter] Trying {base} for @{username}...")
             r = requests.get(url, headers=_random_headers(), timeout=12, allow_redirects=True)
 
-            # Cloudflare challenge → skip
             if "Just a moment..." in r.text or "Checking your browser" in r.text:
                 print("  Cloudflare challenge → skip")
                 continue
@@ -207,15 +239,12 @@ def scrape_twitter(username, verification_code=None):
 
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # ---- Quick fail checks ----
             txt = r.text.lower()
             if any(err in txt for err in ["user not found", "doesn't exist", "suspended", "account suspended"]):
                 continue
 
-            # ---- Name (Robust Multi-Selector) ----
+            # ---- Name ----
             name = username
-
-            # Try multiple CSS selectors
             name_selectors = [
                 "div.profile-card-fullname",
                 "h1.profile-fullname",
@@ -232,12 +261,10 @@ def scrape_twitter(username, verification_code=None):
                         name = candidate
                         break
 
-            # Fallback: Parse <title> tag (very reliable)
             if not name or name == username:
                 title_tag = soup.find("title")
                 if title_tag:
                     title_text = title_tag.get_text(strip=True)
-                    # Match name before @username, (X), /, or "on X"
                     match = re.match(r"^(.+?)(?:\s+[@/\\(]|\s+on\s+X)", title_text, re.IGNORECASE)
                     if match:
                         name = match.group(1).strip()
@@ -246,12 +273,11 @@ def scrape_twitter(username, verification_code=None):
             bio_tag = soup.find("p", class_="profile-bio") or soup.find("div", class_="profile-bio")
             bio = bio_tag.get_text(strip=True) if bio_tag else ""
 
-            # ---- Verification code in bio ----
             verified_code = False
             if verification_code and bio:
                 verified_code = check_verification_code(bio, verification_code)
 
-            # ---- Stats (tweets, following, followers) ----
+            # ---- Stats ----
             tweets = following = followers = "0"
             stat_nums = soup.find_all("span", class_="profile-stat-num")
             if len(stat_nums) >= 3:
@@ -259,7 +285,6 @@ def scrape_twitter(username, verification_code=None):
                 following = stat_nums[1].get_text(strip=True)
                 followers = stat_nums[2].get_text(strip=True)
 
-            # Fallback: <ul class="profile-statlist">
             if followers == "0":
                 stat_list = soup.find("ul", class_="profile-statlist")
                 if stat_list:
@@ -278,10 +303,9 @@ def scrape_twitter(username, verification_code=None):
 
             follower_cnt = parse_count(followers)
 
-            # ---- Avatar (FIXED - Properly Handle All URL Formats) ----
-            avatar = f"https://unavatar.io/twitter/{username}"
-
-            # Try multiple image selectors
+            # ---- Avatar (WITH PROXY) ----
+            avatar_raw = None
+            
             avatar_selectors = [
                 "a.profile-card-avatar img",
                 "img.profile-card-avatar",
@@ -295,49 +319,50 @@ def scrape_twitter(username, verification_code=None):
             for sel in avatar_selectors:
                 img = soup.select_one(sel)
                 if img:
-                    # Try both src and data-src attributes
                     src = img.get("src") or img.get("data-src")
                     if src:
-                        # Handle different URL formats
                         if src.startswith("http://") or src.startswith("https://"):
-                            # Already full URL
-                            avatar = src
+                            avatar_raw = src
                             break
                         elif src.startswith("//"):
-                            # Protocol-relative URL
-                            avatar = "https:" + src
+                            avatar_raw = "https:" + src
                             break
                         elif src.startswith("/pic/") or src.startswith("/profile_images/"):
-                            # Nitter relative URL - prepend base URL
-                            avatar = base + src
-                            print(f"  [Avatar] Converted relative URL: {src} → {avatar}")
+                            avatar_raw = base + src
+                            print(f"  [Avatar] Converted: {src} → {avatar_raw}")
                             break
                         elif src.startswith("/"):
-                            # Other relative URL
-                            avatar = base + src
+                            avatar_raw = base + src
                             break
 
-            # Additional fallback: search for any img with profile_images in src/data-src
-            if avatar == f"https://unavatar.io/twitter/{username}":
+            if not avatar_raw:
                 for img in soup.find_all("img"):
                     src = img.get("src") or img.get("data-src") or ""
                     if "profile_images" in src or "pbs.twimg.com" in src:
                         if src.startswith("http"):
-                            avatar = src
+                            avatar_raw = src
                         elif src.startswith("//"):
-                            avatar = "https:" + src
+                            avatar_raw = "https:" + src
                         elif src.startswith("/"):
-                            avatar = base + src
-                        if avatar != f"https://unavatar.io/twitter/{username}":
-                            print(f"  [Avatar] Found via fallback: {avatar[:80]}...")
+                            avatar_raw = base + src
+                        if avatar_raw:
+                            print(f"  [Avatar] Found via fallback: {avatar_raw[:80]}...")
                             break
+
+            # Convert to proxied URL to avoid CORS
+            if avatar_raw and avatar_raw.startswith("http"):
+                # Use our proxy endpoint
+                from urllib.parse import quote
+                avatar = f"/api/proxy-image?url={quote(avatar_raw)}"
+                print(f"  [Avatar] Proxied: {avatar_raw[:60]}... → {avatar}")
+            else:
+                avatar = f"https://unavatar.io/twitter/{username}"
 
             # ---- Blue check ----
             is_verified = bool(soup.find("span", class_="icon-verified"))
 
-            # ---- Success condition ----
             if follower_cnt >= 10 or (name != username and name) or bio:
-                print(f"  SUCCESS: '{name}' | {format_count(follower_cnt, 'followers')} | Avatar: {avatar[:80]}...")
+                print(f"  SUCCESS: '{name}' | {format_count(follower_cnt, 'followers')}")
                 return {
                     "success": True,
                     "platform": "twitter",
@@ -359,7 +384,7 @@ def scrape_twitter(username, verification_code=None):
             print(f"  Error on {base}: {e}")
             continue
 
-    # ---------- FINAL FALLBACK (unavatar) ----------
+    # Fallback
     try:
         head = requests.head(f"https://unavatar.io/twitter/{username}", timeout=5)
         if head.status_code == 200:
@@ -402,7 +427,6 @@ def scrape_instagram(username, verification_code=None):
         "x-ig-app-id": "936619743392459",
     }
 
-    # METHOD 1: Official API
     try:
         api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
         r = requests.get(api_url, headers=headers, timeout=20)
@@ -434,7 +458,6 @@ def scrape_instagram(username, verification_code=None):
     except Exception as e:
         print(f"Instagram API failed: {e}")
 
-    # Fallback
     try:
         if requests.head(f"https://unavatar.io/instagram/{username}", timeout=5).status_code == 200:
             return {
