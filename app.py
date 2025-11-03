@@ -354,78 +354,221 @@ def extract_ig(url_or_at):
 
 
 def scrape_instagram(username, verification_code=None):
-    username = username.lstrip("@")
+    """
+    Complete Instagram scraper (matches your working reference)
+    - Official API (HD avatar + exact stats)
+    - Web scraping (meta tags)
+    - Imginn fallback
+    - unavatar final fallback
+    - Full verification code support
+    """
+    username = username.lstrip("@").split("?")[0].split("/")[0]
+
+    # ====================== METHOD 1: Instagram Unofficial API ======================
+    api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.instagram.com/",
         "x-ig-app-id": "936619743392459",
+        "x-asbd-id": "129477",
+        "x-ig-www-claim": "0",
+        "x-requested-with": "XMLHttpRequest",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
     }
 
-    # METHOD 1: Official API
     try:
-        print(f"[Instagram] Trying API for @{username}...")
-        api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
+        print(f"[Instagram] Trying official API for @{username}...")
         r = requests.get(api_url, headers=headers, timeout=20)
         if r.status_code == 200:
             data = r.json()
             user = data.get("data", {}).get("user", {})
             if user:
-                bio = user.get("biography", "")
-                verified = False
-                if verification_code and bio:
-                    verified = check_verification_code(bio, verification_code)
-                
-                # Get highest quality profile image
-                profile_image = (
-                    user.get("profile_pic_url_hd") or 
-                    user.get("profile_pic_url") or 
+                followers = user.get("edge_followed_by", {}).get("count", 0)
+                following = user.get("edge_follow", {}).get("count", 0)
+                posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
+                full_name = user.get("full_name") or username
+                bio = user.get("biography") or ""
+
+                # HD profile picture
+                avatar = (
+                    user.get("profile_pic_url_hd") or
+                    user.get("profile_pic_url") or
                     f"https://unavatar.io/instagram/{username}"
                 )
-                
-                print(f"  ✓ Found via API: {user.get('full_name', username)}")
-                
+
+                is_verified = user.get("is_verified", False)
+                verified = check_verification_code(bio, verification_code) if verification_code else False
+
+                print(f"  Success (API): {full_name}, {format_count(followers, 'followers')}")
                 return {
                     "success": True,
                     "platform": "instagram",
                     "username": username,
-                    "name": user.get("full_name") or username,
-                    "follower_count": format_count(user.get("edge_followed_by", {}).get("count", 0), "followers"),
-                    "follower_count_exact": str(user.get("edge_followed_by", {}).get("count", 0)),
-                    "following_count": format_count(user.get("edge_follow", {}).get("count", 0), "following"),
-                    "post_count": format_count(user.get("edge_owner_to_timeline_media", {}).get("count", 0), "posts"),
+                    "name": full_name,
+                    "follower_count": format_count(followers, "followers"),
+                    "follower_count_exact": str(followers),
+                    "following_count": format_count(following, "following"),
+                    "post_count": format_count(posts, "posts"),
                     "profile_url": f"https://instagram.com/{username}",
-                    "profile_image": profile_image,
+                    "profile_image": avatar,
                     "bio": bio[:250],
                     "method": "instagram_api",
                     "verificationCodeFound": verified,
-                    "isVerified": user.get("is_verified", False),
+                    "isVerified": is_verified,
                 }
     except Exception as e:
-        print(f"  ✗ Instagram API failed: {e}")
+        print(f"  Instagram API failed: {e}")
 
-    # Fallback with unavatar
+    # ====================== METHOD 2: Web Scraping (Meta Tags) ======================
+    try:
+        print(f"[Instagram] Trying web scraping for @{username}...")
+        web_url = f"https://www.instagram.com/{username}/"
+        r = requests.get(web_url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # Avatar from og:image (usually HD)
+            avatar = f"https://unavatar.io/instagram/{username}"
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content", "").startswith("http"):
+                avatar = og_img["content"]
+                print(f"  Found HD avatar from og:image")
+
+            # Name & stats from og:description
+            name = username
+            follower_count = 0
+            following_count = 0
+            post_count = 0
+            bio = ""
+
+            meta_desc = soup.find("meta", property="og:description")
+            if meta_desc:
+                desc = meta_desc.get("content", "")
+                # Name: "Name (@username) · ..."
+                name_match = re.search(r"^([^(@]+)", desc)
+                if name_match:
+                    name = name_match.group(1).strip()
+
+                # Followers
+                followers_match = re.search(r"([\d,.]+[KMB]?)\s*Followers?", desc, re.I)
+                if followers_match:
+                    follower_count = parse_count(followers_match.group(1))
+
+                # Following
+                following_match = re.search(r"([\d,.]+[KMB]?)\s*Following", desc, re.I)
+                if following_match:
+                    following_count = parse_count(following_match.group(1))
+
+                # Posts
+                posts_match = re.search(r"([\d,.]+[KMB]?)\s*Posts?", desc, re.I)
+                if posts_match:
+                    post_count = parse_count(posts_match.group(1))
+
+                # Bio (between · ·)
+                bio_match = re.search(r"·\s*(.+?)\s*·", desc)
+                if bio_match:
+                    bio = bio_match.group(1).strip()
+
+            verified = check_verification_code(bio, verification_code) if verification_code else False
+
+            if follower_count > 0 or name != username:
+                print(f"  Success (web): {name}, {format_count(follower_count, 'followers')}")
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": name,
+                    "follower_count": format_count(follower_count, "followers"),
+                    "follower_count_exact": str(follower_count),
+                    "following_count": format_count(following_count, "following"),
+                    "post_count": format_count(post_count, "posts"),
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": avatar,
+                    "bio": bio[:250],
+                    "method": "instagram_web",
+                    "verificationCodeFound": verified,
+                    "isVerified": False,
+                }
+    except Exception as e:
+        print(f"  Web scraping failed: {e}")
+
+    # ====================== METHOD 3: Imginn (Public Viewer) ======================
+    try:
+        print(f"[Instagram] Trying Imginn for @{username}...")
+        imginn_url = f"https://imginn.com/{username}/"
+        r = requests.get(imginn_url, headers={"User-Agent": headers["User-Agent"]}, timeout=15)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # Avatar
+            avatar = f"https://unavatar.io/instagram/{username}"
+            avatar_img = soup.find("img", class_=lambda x: x and "avatar" in x.lower()) or \
+                        soup.find("img", alt=lambda x: x and username.lower() in str(x).lower())
+            if avatar_img and avatar_img.get("src", "").startswith("http"):
+                avatar = avatar_img["src"]
+
+            # Name
+            name = username.title()
+            name_elem = soup.find("h1") or soup.find("h2")
+            if name_elem:
+                name = name_elem.get_text(strip=True)
+
+            # Stats
+            text = soup.get_text()
+            followers_match = re.search(r"([\d,.]+[KMB]?)\s*(?:Followers?|followers?)", text, re.I)
+            follower_count = parse_count(followers_match.group(1)) if followers_match else 0
+
+            verified = check_verification_code("", verification_code)  # No bio
+
+            if follower_count > 0 or avatar.startswith("http"):
+                print(f"  Success (Imginn): {name}")
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": name,
+                    "follower_count": format_count(follower_count, "followers"),
+                    "follower_count_exact": str(follower_count),
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": avatar,
+                    "bio": "",
+                    "method": "imginn",
+                    "verificationCodeFound": verified,
+                    "isVerified": False,
+                }
+    except Exception as e:
+        print(f"  Imginn failed: {e}")
+
+    # ====================== FINAL FALLBACK: unavatar ======================
     try:
         unavatar_url = f"https://unavatar.io/instagram/{username}"
-        unavatar_check = requests.head(unavatar_url, timeout=5)
-        if unavatar_check.status_code == 200:
+        if requests.head(unavatar_url, timeout=5).status_code == 200:
+            print(f"  Fallback: unavatar")
             return {
                 "success": True,
                 "platform": "instagram",
                 "username": username,
-                "name": username.replace("_", " ").title(),
+                "name": username.replace("_", " ").replace(".", " ").title(),
                 "follower_count": "Hidden",
+                "follower_count_exact": "0",
                 "profile_url": f"https://instagram.com/{username}",
                 "profile_image": unavatar_url,
-                "bio": "Profile exists. Login required for stats.",
+                "bio": "Login required to view stats.",
                 "method": "unavatar",
                 "verificationCodeFound": False,
+                "isVerified": False,
             }
     except:
         pass
 
-    return {"success": False, "error": f"Cannot access @{username}"}
+    return {
+        "success": False,
+        "error": f"Cannot access @{username}. Profile may be private or blocked."
+    }
 
 
 # ==================== TIKTOK ====================
