@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v24 (TWITTER AVATAR PROXY FIX)
+# app.py – Social-Media Stats API v25 (TWITTER AVATAR PROXY FIX - FULL URL)
 # --------------------------------------------------------------
 
 import os
@@ -38,12 +38,27 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
+# Get the base URL for this application (for proxy URLs)
+# This will be set automatically by Flask based on the request
+# But you can also set it manually via environment variable
+BASE_URL = os.getenv("BASE_URL", "")  # e.g., "https://your-app.onrender.com"
+
 # ------------------------------------------------
 def async_route(f):
     @wraps(f)
     def wrapper(*a, **kw):
         return asyncio.run(f(*a, **kw))
     return wrapper
+
+
+def get_base_url():
+    """Get the base URL for the application"""
+    if BASE_URL:
+        return BASE_URL.rstrip('/')
+    # Fallback to request context if available
+    if request:
+        return request.url_root.rstrip('/')
+    return ""
 
 
 # ==================== HELPERS ====================
@@ -185,7 +200,7 @@ def yt_by_handle(handle, verification_code=None):
     return yt_by_id(cid, verification_code)
 
 
-# ==================== TWITTER (AVATAR PROXY FIX) ====================
+# ==================== TWITTER (AVATAR PROXY FIX - FULL URL) ====================
 NITTER_INSTANCES = [
     "https://nitter.lucabased.xyz",
     "https://nitter.poast.org",
@@ -303,7 +318,7 @@ def scrape_twitter(username, verification_code=None):
 
             follower_cnt = parse_count(followers)
 
-            # ---- Avatar (WITH PROXY) ----
+            # ---- Avatar (WITH FULL URL PROXY) ----
             avatar_raw = None
             
             avatar_selectors = [
@@ -349,12 +364,13 @@ def scrape_twitter(username, verification_code=None):
                             print(f"  [Avatar] Found via fallback: {avatar_raw[:80]}...")
                             break
 
-            # Convert to proxied URL to avoid CORS
+            # Convert to proxied URL with FULL BASE URL
             if avatar_raw and avatar_raw.startswith("http"):
-                # Use our proxy endpoint
                 from urllib.parse import quote
-                avatar = f"/api/proxy-image?url={quote(avatar_raw)}"
-                print(f"  [Avatar] Proxied: {avatar_raw[:60]}... → {avatar}")
+                # Get the full base URL for this application
+                app_base = get_base_url()
+                avatar = f"{app_base}/api/proxy-image?url={quote(avatar_raw)}"
+                print(f"  [Avatar] Proxied (Full URL): {avatar_raw[:60]}... → {avatar[:80]}...")
             else:
                 avatar = f"https://unavatar.io/twitter/{username}"
 
@@ -996,12 +1012,12 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "23.0 - TWITTER AVATAR FIXED",
+        "version": "25.0 - TWITTER AVATAR FIXED WITH FULL URL",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
-            "/api/twitter": "POST – Twitter/X (avatar fixed)",
+            "/api/twitter": "POST – Twitter/X (avatar fixed with full URL)",
             "/api/instagram": "POST – Instagram",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram",
@@ -1009,10 +1025,10 @@ def info():
             "/api/health": "GET – health check",
         },
         "fixes": {
-            "twitter": "Fixed avatar URL handling - now properly converts Nitter relative URLs to full URLs",
+            "twitter": "Fixed avatar URL - now returns full proxy URL with base domain for cross-domain support",
         }
     })
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=True
