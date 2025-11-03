@@ -151,6 +151,7 @@ def yt_by_handle(handle, verification_code=None):
 # ==================== TWITTER (NEW & ROBUST) ====================
 # 30+ healthy Nitter instances (updated Nov 2025)
 NITTER_INSTANCES = [
+    "https://nitter.lucabased.xyz",
     "https://xcancel.com",
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
@@ -168,7 +169,6 @@ NITTER_INSTANCES = [
     "https://nitter.esmailelbob.xyz",
     "https://nitter.domain.glass",
     "https://nitter.sethforprivacy.com",
-    "https://nitter.lucabased.xyz",
     "https://nitter.rawbit.ch",
     "https://nitter.electronicfrontier.foundation",
     "https://nitter.mint.lgbt",
