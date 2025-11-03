@@ -239,21 +239,35 @@ def scrape_twitter(username, verification_code=None):
             if any(err in txt for err in ["user not found", "doesn't exist", "suspended", "account suspended"]):
                 continue
 
-            # ---- Name ----
+            # ---- Name (Robust Multi-Selector) ----
             name = username
-            # 1. profile-card-fullname
-            tag = soup.find("a", class_="profile-card-fullname") or soup.find("div", class_="profile-card-fullname")
-            if tag:
-                name = tag.get_text(strip=True)
 
-            # 2. Fallback to <title>
+            # Try multiple CSS selectors
+            name_selectors = [
+                "div.profile-card-fullname",
+                "h1.profile-fullname",
+                "a.profile-card-fullname",
+                "div.profile-fullname",
+                "span.profile-fullname",
+                "h1",
+            ]
+            for sel in name_selectors:
+                tag = soup.select_one(sel)
+                if tag and tag.get_text(strip=True):
+                    candidate = tag.get_text(strip=True).strip()
+                    if candidate and candidate != username and len(candidate) > 1:
+                        name = candidate
+                        break
+
+            # Fallback: Parse <title> tag (very reliable)
             if not name or name == username:
-                title = soup.find("title")
-                if title:
-                    t = title.get_text(strip=True)
-                    m = re.match(r"^(.+?)\s*(?:/|\\u0028|@\w+)", t)
-                    if m:
-                        name = m.group(1).strip()
+                title_tag = soup.find("title")
+                if title_tag:
+                    title_text = title_tag.get_text(strip=True)
+                    # Match name before @username, (X), /, or "on X"
+                    match = re.match(r"^(.+?)(?:\s+[@/\\(]|\s+on\s+X)", title_text, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
 
             # ---- Bio ----
             bio_tag = soup.find("p", class_="profile-bio") or soup.find("div", class_="profile-bio")
@@ -264,7 +278,7 @@ def scrape_twitter(username, verification_code=None):
             if verification_code and bio:
                 verified_code = check_verification_code(bio, verification_code)
 
-            # ---- Stats ----
+            # ---- Stats (tweets, following, followers) ----
             tweets = following = followers = "0"
             stat_nums = soup.find_all("span", class_="profile-stat-num")
             if len(stat_nums) >= 3:
@@ -272,7 +286,7 @@ def scrape_twitter(username, verification_code=None):
                 following = stat_nums[1].get_text(strip=True)
                 followers = stat_nums[2].get_text(strip=True)
 
-            # Fallback list
+            # Fallback: <ul class="profile-statlist">
             if followers == "0":
                 stat_list = soup.find("ul", class_="profile-statlist")
                 if stat_list:
@@ -291,24 +305,43 @@ def scrape_twitter(username, verification_code=None):
 
             follower_cnt = parse_count(followers)
 
-            # ---- Avatar ----
+            # ---- Avatar (Robust Multi-Selector) ----
             avatar = f"https://unavatar.io/twitter/{username}"
-            av_link = soup.find("a", class_="profile-card-avatar")
-            if av_link:
-                img = av_link.find("img")
-                if img and img.get("src"):
-                    src = img["src"]
-                    if src.startswith("http"):
-                        avatar = src
-                    elif src.startswith("/"):
-                        avatar = base + src
+
+            # Try multiple image selectors
+            avatar_selectors = [
+                "a.profile-card-avatar img",
+                "img.profile-card-avatar",
+                "div.profile-avatar img",
+                "img.avatar",
+                f"a[href^='/{username}'] img",
+                "img[src*='profile_images']",
+            ]
+            for sel in avatar_selectors:
+                img = soup.select_one(sel)
+                if img:
+                    src = img.get("src") or img.get("data-src")
+                    if src:
+                        if src.startswith("http"):
+                            avatar = src
+                        elif src.startswith("/"):
+                            avatar = base + src
+                        elif src.startswith("//"):
+                            avatar = "https:" + src
+                        break
+
+            # Final fallback: any img with data-src
+            if avatar == f"https://unavatar.io/twitter/{username}":
+                data_img = soup.find("img", {"data-src": True})
+                if data_img and data_img["data-src"].startswith("http"):
+                    avatar = data_img["data-src"]
 
             # ---- Blue check ----
             is_verified = bool(soup.find("span", class_="icon-verified"))
 
             # ---- Success condition ----
             if follower_cnt >= 10 or (name != username and name) or bio:
-                print(f"  SUCCESS: {name}, {format_count(follower_cnt, 'followers')}")
+                print(f"  SUCCESS: '{name}' | {format_count(follower_cnt, 'followers')} | Avatar: {avatar[:50]}...")
                 return {
                     "success": True,
                     "platform": "twitter",
@@ -330,7 +363,7 @@ def scrape_twitter(username, verification_code=None):
             print(f"  Error on {base}: {e}")
             continue
 
-    # ---------- FINAL FALLBACK ----------
+    # ---------- FINAL FALLBACK (unavatar) ----------
     try:
         head = requests.head(f"https://unavatar.io/twitter/{username}", timeout=5)
         if head.status_code == 200:
