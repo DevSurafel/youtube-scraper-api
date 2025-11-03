@@ -398,96 +398,160 @@ def extract_ig(url_or_at):
 
 
 def scrape_instagram(username, verification_code=None):
-    username = username.lstrip("@").split("?")[0]
+    username = username.lstrip("@").split("?")[0].split("/")[0]
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Pragma": "no-cache",
+        "Cache-Control": "no-cache",
     }
 
+    session = requests.Session()
+    session.headers.update(headers)
+
     try:
-        print(f"[Instagram] Scraping https://www.instagram.com/{username}/")
+        print(f"[Instagram] Scraping mobile profile: @{username}")
         url = f"https://www.instagram.com/{username}/"
-        r = requests.get(url, headers=headers, timeout=20)
+        r = session.get(url, timeout=20)
+        
         if r.status_code != 200:
             raise ValueError(f"HTTP {r.status_code}")
 
-        # Extract JSON from <script type="text/javascript">window._sharedData = ...
+        # Look for JSON in <script type="application/ld+json"> or window.__initialData
         soup = BeautifulSoup(r.text, "html.parser")
-        script = soup.find("script", text=re.compile(r"window\._sharedData"))
-        if not script:
-            # Try newer format: __additionalData
-            script = soup.find("script", text=re.compile(r"__additionalData"))
-        if not script:
-            raise ValueError("No JSON data found")
 
-        json_text = re.search(r"\{.*\}", script.string)
-        if not json_text:
-            raise ValueError("JSON not parseable")
-        data = json.loads(json_text.group())
+        # Method 1: Try ld+json (most reliable now)
+        ld_json = soup.find("script", type="application/ld+json")
+        if ld_json:
+            try:
+                data = json.loads(ld_json.string)
+                main_entity = data.get("mainEntity", {}) or data.get("@graph", [{}])[0]
+                name = main_entity.get("name", username)
+                bio = main_entity.get("description", "")
+                interaction = main_entity.get("interactionStatistic", [])
+                follower_count = 0
+                for stat in interaction:
+                    if stat.get("interactionType") == "http://schema.org/FollowAction":
+                        follower_count = int(stat.get("userInteractionCount", 0))
+                        break
+                profile_pic = main_entity.get("image", {}).get("url") or f"https://unavatar.io/instagram/{username}"
+                is_verified = main_entity.get("verified", False)
 
-        # Try multiple paths
-        user = None
-        if "entry_data" in data and "ProfilePage" in data["entry_data"]:
-            user = data["entry_data"]["ProfilePage"][0]["graphql"]["user"]
-        elif "config" in data and "csrf_token" in data["config"]:
-            # New format
-            additional = soup.find("script", {"type": "application/json", "id": "additionalData"})
-            if additional:
-                try:
-                    add_data = json.loads(additional.string)
-                    user = add_data.get("data", {}).get("user", {})
-                except:
-                    pass
-        else:
-            # Fallback: search in all scripts
-            for s in soup.find_all("script"):
-                if "ProfilePage" in s.text:
-                    try:
-                        m = re.search(r'"ProfilePage":\[(\{.*?\})\]', s.text)
-                        if m:
-                            user = json.loads(m.group(1))["graphql"]["user"]
-                            break
-                    except:
-                        continue
+                verified = check_verification_code(bio, verification_code) if verification_code else False
 
-        if not user:
-            raise ValueError("User not found in page")
+                print(f"  Success (ld+json): {name}, {format_count(follower_count, 'followers')}")
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": name,
+                    "follower_count": format_count(follower_count, "followers"),
+                    "follower_count_exact": str(follower_count),
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": profile_pic,
+                    "bio": bio[:250],
+                    "method": "instagram_ldjson",
+                    "verificationCodeFound": verified,
+                    "isVerified": is_verified,
+                }
+            except Exception as e:
+                print(f"  ld+json parse error: {e}")
 
-        # Extract data
-        full_name = user.get("full_name") or username
-        bio = user.get("biography") or ""
-        follower_count = user.get("edge_followed_by", {}).get("count", 0)
-        following_count = user.get("edge_follow", {}).get("count", 0)
-        post_count = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
-        profile_pic = user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}"
-        is_verified = user.get("is_verified", False)
+        # Method 2: Fallback to __initialData (new format)
+        script = soup.find("script", string=re.compile(r"window\.__initialData"))
+        if script:
+            try:
+                json_text = re.search(r"\{.*\}", script.string).group()
+                data = json.loads(json_text)
+                user_data = data.get("data", {}).get("user", {})
+                if not user_data:
+                    raise ValueError("No user in __initialData")
+                
+                full_name = user_data.get("full_name", username)
+                bio = user_data.get("biography", "")
+                follower_count = user_data.get("edge_followed_by", {}).get("count", 0)
+                profile_pic = user_data.get("profile_pic_url_hd") or user_data.get("profile_pic_url")
+                is_verified = user_data.get("is_verified", False)
 
-        verified = False
-        if verification_code and bio:
-            verified = check_verification_code(bio, verification_code)
+                verified = check_verification_code(bio, verification_code) if verification_code else False
 
-        print(f"  Success: {full_name}, {format_count(follower_count, 'followers')}")
+                print(f"  Success (__initialData): {full_name}, {format_count(follower_count, 'followers')}")
+                return {
+                    "success": True,
+                    "platform": "instagram",
+                    "username": username,
+                    "name": full_name,
+                    "follower_count": format_count(follower_count, "followers"),
+                    "follower_count_exact": str(follower_count),
+                    "profile_url": f"https://instagram.com/{username}",
+                    "profile_image": profile_pic,
+                    "bio": bio[:250],
+                    "method": "instagram_initialdata",
+                    "verificationCodeFound": verified,
+                    "isVerified": is_verified,
+                }
+            except Exception as e:
+                print(f"  __initialData error: {e}")
 
-        return {
-            "success": True,
-            "platform": "instagram",
-            "username": username,
-            "name": full_name,
-            "follower_count": format_count(follower_count, "followers"),
-            "follower_count_exact": str(follower_count),
-            "following_count": format_count(following_count, "following"),
-            "post_count": format_count(post_count, "posts"),
-            "profile_url": f"https://instagram.com/{username}",
-            "profile_image": profile_pic,
-            "bio": bio[:250],
-            "method": "instagram_web_scrape",
-            "verificationCodeFound": verified,
-            "isVerified": is_verified,
-        }
+        # Method 3: Try mobile HTML parsing (last resort)
+        title = soup.find("title")
+        if title and "Page Not Found" in title.get_text():
+            raise ValueError("Profile not found")
+
+        # Extract from meta tags
+        name = username
+        og_title = soup.find("meta", property="og:title")
+        if og_title:
+            name = og_title["content"].split("(@")[0].strip()
+
+        follower_count = 0
+        for meta in soup.find_all("meta", property="og:description"):
+            desc = meta.get("content", "")
+            match = re.search(r"([\d,]+) Followers", desc)
+            if match:
+                follower_count = parse_count(match.group(1))
+
+        profile_pic = f"https://unavatar.io/instagram/{username}"
+        og_image = soup.find("meta", property="og:image")
+        if og_image:
+            profile_pic = og_image["content"]
+
+        bio = ""
+        for meta in soup.find_all("meta", property="og:description"):
+            desc = meta.get("content", "")
+            bio_match = re.search(r"·\s*(.+?)\s*·", desc)
+            if bio_match:
+                bio = bio_match.group(1)
+                break
+
+        verified = check_verification_code(bio, verification_code) if verification_code else False
+
+        if follower_count > 0 or name != username:
+            print(f"  Success (meta): {name}, {format_count(follower_count, 'followers')}")
+            return {
+                "success": True,
+                "platform": "instagram",
+                "username": username,
+                "name": name,
+                "follower_count": format_count(follower_count, "followers"),
+                "follower_count_exact": str(follower_count),
+                "profile_url": f"https://instagram.com/{username}",
+                "profile_image": profile_pic,
+                "bio": bio[:250],
+                "method": "instagram_meta",
+                "verificationCodeFound": verified,
+                "isVerified": False,
+            }
 
     except Exception as e:
         print(f"Instagram scrape failed: {e}")
@@ -503,14 +567,14 @@ def scrape_instagram(username, verification_code=None):
                 "follower_count": "Hidden",
                 "profile_url": f"https://instagram.com/{username}",
                 "profile_image": f"https://unavatar.io/instagram/{username}",
-                "bio": "Profile exists. Login required for stats.",
+                "bio": "Login required to view stats.",
                 "method": "unavatar",
                 "verificationCodeFound": False,
             }
     except:
         pass
 
-    return {"success": False, "error": f"Cannot access @{username}"}
+    return {"success": False, "error": "Instagram profile inaccessible"}
 
 
 # ==================== TIKTOK (UNCHANGED) ====================
