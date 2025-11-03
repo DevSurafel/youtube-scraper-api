@@ -655,6 +655,28 @@ def scrape_facebook(identifier, entity_type="page"):
             about_div = soup.find("div", {"id": "about_basics"})
             if about_div:
                 bio = about_div.get_text(strip=True)[:250]
+            
+            # If no bio from about_basics, try meta description
+            if not bio:
+                meta_desc = soup.find("meta", {"name": "description"})
+                if meta_desc:
+                    bio = meta_desc.get("content", "")[:250]
+            
+            # Extract count from bio if not found yet
+            if count == "Hidden" and bio:
+                bio_patterns = [
+                    r'([\d,]+)\s+likes',
+                    r'([\d,]+)\s+followers',
+                    r'([\d,]+)\s+members',
+                ]
+                for pat in bio_patterns:
+                    bio_match = re.search(pat, bio, re.I)
+                    if bio_match:
+                        parsed = parse_count(bio_match.group(1).replace(",", ""))
+                        if parsed >= 10:
+                            count_exact = str(parsed)
+                            count = format_count(parsed, count_label)
+                            break
 
             # Success if we have name OR count
             return {
@@ -718,6 +740,23 @@ def scrape_facebook(identifier, entity_type="page"):
             og_desc = soup.find("meta", property="og:description")
             if og_desc:
                 bio = og_desc.get("content", "")[:250]
+                
+                # Extract count from bio if not found yet
+                if count == "Hidden" and bio:
+                    # Try to extract likes/followers from bio text
+                    bio_patterns = [
+                        r'([\d,]+)\s+likes',
+                        r'([\d,]+)\s+followers',
+                        r'([\d,]+)\s+members',
+                    ]
+                    for pat in bio_patterns:
+                        bio_match = re.search(pat, bio, re.I)
+                        if bio_match:
+                            parsed = parse_count(bio_match.group(1).replace(",", ""))
+                            if parsed >= 10:
+                                count_exact = str(parsed)
+                                count = format_count(parsed, count_label)
+                                break
 
             return {
                 "success": True,
@@ -877,7 +916,7 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "17.0 - Instagram & Facebook FULLY FIXED",
+        "version": "17.1 - Instagram & Facebook FULLY WORKING (bio extraction added)",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
