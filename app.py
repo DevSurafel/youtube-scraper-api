@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v22 (TWITTER FIXED FOR ALL USERS)
+# app.py – Social-Media Stats API v23 (TWITTER AVATAR FIXED)
 # --------------------------------------------------------------
 
 import os
@@ -148,35 +148,12 @@ def yt_by_handle(handle, verification_code=None):
     return yt_by_id(cid, verification_code)
 
 
-# ==================== TWITTER (NEW & ROBUST) ====================
+# ==================== TWITTER (AVATAR FIXED) ====================
 # 30+ healthy Nitter instances (updated Nov 2025)
 NITTER_INSTANCES = [
     "https://nitter.lucabased.xyz",
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
-    # "https://nitter.net",
-    # "https://nitter.1d4.us",
-    # "https://nitter.unixfox.eu",
-    # "https://nitter.076.ne.jp",
-    # "https://nitter.koyu.space",
-    # "https://nitter.fdn.fr",
-    # "https://nitter.space",
-    # "https://nitter.catalyst.sx",
-    # "https://nitter.kuu.moe",
-    # "https://nitter.esmailelbob.xyz",
-    # "https://nitter.domain.glass",
-    # "https://nitter.sethforprivacy.com",
-    # "https://nitter.rawbit.ch",
-    # "https://nitter.electronicfrontier.foundation",
-    # "https://nitter.mint.lgbt",
-    # "https://nitter.hostux.net",
-    # "https://nitter.smnz.de",
-    # "https://nitter.pussthecat.org",
-    # "https://nitter.adminforge.de",
-    # "https://nitter.cutelab.space",
-    # "https://nitter.projectsegfau.lt",
-    # "https://nitter.priv.pw",
-    # "https://nitter.vern.cc",
 ]
 
 # Random User-Agents (desktop browsers)
@@ -301,7 +278,7 @@ def scrape_twitter(username, verification_code=None):
 
             follower_cnt = parse_count(followers)
 
-            # ---- Avatar (Robust Multi-Selector) ----
+            # ---- Avatar (FIXED - Properly Handle All URL Formats) ----
             avatar = f"https://unavatar.io/twitter/{username}"
 
             # Try multiple image selectors
@@ -312,32 +289,55 @@ def scrape_twitter(username, verification_code=None):
                 "img.avatar",
                 f"a[href^='/{username}'] img",
                 "img[src*='profile_images']",
+                "img[data-src*='profile_images']",
             ]
+            
             for sel in avatar_selectors:
                 img = soup.select_one(sel)
                 if img:
+                    # Try both src and data-src attributes
                     src = img.get("src") or img.get("data-src")
                     if src:
+                        # Handle different URL formats
+                        if src.startswith("http://") or src.startswith("https://"):
+                            # Already full URL
+                            avatar = src
+                            break
+                        elif src.startswith("//"):
+                            # Protocol-relative URL
+                            avatar = "https:" + src
+                            break
+                        elif src.startswith("/pic/") or src.startswith("/profile_images/"):
+                            # Nitter relative URL - prepend base URL
+                            avatar = base + src
+                            print(f"  [Avatar] Converted relative URL: {src} → {avatar}")
+                            break
+                        elif src.startswith("/"):
+                            # Other relative URL
+                            avatar = base + src
+                            break
+
+            # Additional fallback: search for any img with profile_images in src/data-src
+            if avatar == f"https://unavatar.io/twitter/{username}":
+                for img in soup.find_all("img"):
+                    src = img.get("src") or img.get("data-src") or ""
+                    if "profile_images" in src or "pbs.twimg.com" in src:
                         if src.startswith("http"):
                             avatar = src
-                        elif src.startswith("/"):
-                            avatar = base + src
                         elif src.startswith("//"):
                             avatar = "https:" + src
-                        break
-
-            # Final fallback: any img with data-src
-            if avatar == f"https://unavatar.io/twitter/{username}":
-                data_img = soup.find("img", {"data-src": True})
-                if data_img and data_img["data-src"].startswith("http"):
-                    avatar = data_img["data-src"]
+                        elif src.startswith("/"):
+                            avatar = base + src
+                        if avatar != f"https://unavatar.io/twitter/{username}":
+                            print(f"  [Avatar] Found via fallback: {avatar[:80]}...")
+                            break
 
             # ---- Blue check ----
             is_verified = bool(soup.find("span", class_="icon-verified"))
 
             # ---- Success condition ----
             if follower_cnt >= 10 or (name != username and name) or bio:
-                print(f"  SUCCESS: '{name}' | {format_count(follower_cnt, 'followers')} | Avatar: {avatar[:50]}...")
+                print(f"  SUCCESS: '{name}' | {format_count(follower_cnt, 'followers')} | Avatar: {avatar[:80]}...")
                 return {
                     "success": True,
                     "platform": "twitter",
@@ -973,12 +973,12 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "22.0 - TWITTER FIXED FOR ALL ACCOUNTS",
+        "version": "23.0 - TWITTER AVATAR FIXED",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
-            "/api/twitter": "POST – Twitter/X (works for every user)",
+            "/api/twitter": "POST – Twitter/X (avatar fixed)",
             "/api/instagram": "POST – Instagram",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram",
@@ -986,7 +986,7 @@ def info():
             "/api/health": "GET – health check",
         },
         "fixes": {
-            "twitter": "30+ Nitter instances, random UA, Cloudflare skip, robust parsing – now works for all accounts",
+            "twitter": "Fixed avatar URL handling - now properly converts Nitter relative URLs to full URLs",
         }
     })
 
