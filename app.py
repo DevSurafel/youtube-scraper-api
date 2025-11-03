@@ -178,7 +178,6 @@ NITTER_INSTANCES = [
     "https://nitter.adminforge.de",
     "https://nitter.cutelab.space",
     "https://nitter.projectsegfau.lt",
-    "https://nitter.tiekoetter.com",
     "https://nitter.priv.pw",
     "https://nitter.vern.cc",
 ]
