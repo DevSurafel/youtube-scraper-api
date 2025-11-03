@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v19 (FIXED: Facebook & Twitter)
+# app.py – Social-Media Stats API v20 (WITH VERIFICATION CODE SUPPORT)
 # --------------------------------------------------------------
 
 import os
@@ -79,6 +79,13 @@ def parse_count(txt):
         return 0
 
 
+def check_verification_code(text, code):
+    """Check if verification code exists in text"""
+    if not text or not code:
+        return False
+    return code.upper() in text.upper()
+
+
 # ==================== YOUTUBE ====================
 def extract_yt(url):
     m = re.search(r"youtube\.com/channel/(UC[\w-]+)", url)
@@ -88,7 +95,7 @@ def extract_yt(url):
     return None, None
 
 
-def yt_by_id(cid):
+def yt_by_id(cid, verification_code=None):
     if not YOUTUBE_API_KEY:
         return {"success": False, "error": "YouTube API key missing"}
     r = requests.get(
@@ -101,21 +108,31 @@ def yt_by_id(cid):
     ch = r["items"][0]
     stats = ch["statistics"]
     snippet = ch["snippet"]
+    
+    description = snippet.get("description", "")
+    verified = False
+    if verification_code:
+        verified = check_verification_code(description, verification_code)
+    
     return {
         "success": True,
         "platform": "youtube",
-        "channel_name": snippet["title"],
+        "username": snippet["title"],
+        "name": snippet["title"],
         "subscriber_count": format_count(stats.get("subscriberCount", 0), "subscribers"),
         "subscriber_count_exact": stats.get("subscriberCount", "0"),
-        "video_count": format_count(stats.get("videoCount", 0), "videos"),
+        "video_count": stats.get("videoCount", "0"),
         "view_count": format_count(stats.get("viewCount", 0), "views"),
-        "channel_url": f"https://www.youtube.com/channel/{cid}",
-        "thumbnail": snippet["thumbnails"]["high"]["url"],
-        "description": snippet.get("description", "")[:300],
+        "profile_url": f"https://www.youtube.com/channel/{cid}",
+        "profile_image": snippet["thumbnails"]["high"]["url"],
+        "description": description[:300],
+        "bio": description[:300],
+        "verificationCodeFound": verified,
+        "isVerified": snippet.get("customUrl") is not None,  # YouTube verified badge
     }
 
 
-def yt_by_handle(handle):
+def yt_by_handle(handle, verification_code=None):
     if not YOUTUBE_API_KEY:
         return {"success": False, "error": "YouTube API key missing"}
     r = requests.get(
@@ -127,7 +144,7 @@ def yt_by_handle(handle):
     if not r.get("items"):
         return {"success": False, "error": "Channel not found"}
     cid = r["items"][0]["snippet"]["channelId"]
-    return yt_by_id(cid)
+    return yt_by_id(cid, verification_code)
 
 
 # ==================== TWITTER (SUPER FIXED) ====================
@@ -149,7 +166,7 @@ def extract_tw(url_or_at):
     return None
 
 
-def scrape_twitter(username):
+def scrape_twitter(username, verification_code=None):
     username = username.lstrip("@")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -173,22 +190,18 @@ def scrape_twitter(username):
             if any(err in text_lower for err in ["user not found", "doesn't exist", "suspended"]):
                 continue
 
-            # Extract name - MULTIPLE METHODS
+            # Extract name
             name = username
-            
-            # Method 1: profile-card-fullname
             name_tag = soup.find("a", class_="profile-card-fullname")
             if not name_tag:
                 name_tag = soup.find("div", class_="profile-card-fullname")
             if name_tag:
                 name = name_tag.get_text(strip=True)
             
-            # Method 2: From title tag
             if not name or name == username:
                 title = soup.find("title")
                 if title:
                     title_text = title.get_text(strip=True)
-                    # Extract name before " / X" or " (@username)"
                     name_match = re.match(r"^(.+?)\s*(?:/|\\u0028|@)", title_text)
                     if name_match:
                         name = name_match.group(1).strip()
@@ -201,17 +214,19 @@ def scrape_twitter(username):
             if bio_tag:
                 bio = bio_tag.get_text(strip=True)
 
-            # Extract stats - MULTIPLE METHODS
+            # Check verification code in bio
+            verified = False
+            if verification_code and bio:
+                verified = check_verification_code(bio, verification_code)
+
+            # Extract stats
             tweets = following = followers = "0"
-            
-            # Method 1: Direct stat nums
             stat_nums = soup.find_all("span", class_="profile-stat-num")
             if len(stat_nums) >= 3:
                 tweets = stat_nums[0].get_text(strip=True)
                 following = stat_nums[1].get_text(strip=True)
                 followers = stat_nums[2].get_text(strip=True)
             
-            # Method 2: Stat list parsing
             if followers == "0":
                 stat_list = soup.find("ul", class_="profile-statlist")
                 if stat_list:
@@ -242,7 +257,9 @@ def scrape_twitter(username):
                     elif src.startswith("/"):
                         avatar = base + src
 
-            # Validate data
+            # Check if account is verified (blue check)
+            is_verified = bool(soup.find("span", class_="icon-verified"))
+
             if follower_cnt >= 10 or (name != username and len(name) > 0) or len(bio) > 0:
                 print(f"  ✓ Found: {name}, {format_count(follower_cnt, 'followers')}")
                 return {
@@ -254,10 +271,12 @@ def scrape_twitter(username):
                     "follower_count": format_count(follower_cnt, "followers"),
                     "follower_count_exact": str(follower_cnt),
                     "following_count": format_count(parse_count(following), "following"),
-                    "tweet_count": format_count(parse_count(tweets), "tweets"),
+                    "tweet_count": tweets,
                     "profile_url": f"https://twitter.com/{username}",
                     "profile_image": avatar,
                     "method": base.replace("https://", ""),
+                    "verificationCodeFound": verified,
+                    "isVerified": is_verified,
                 }
                 
         except Exception as e:
@@ -279,6 +298,7 @@ def scrape_twitter(username):
                 "profile_image": f"https://unavatar.io/twitter/{username}",
                 "bio": "Profile exists but stats are unavailable.",
                 "method": "unavatar",
+                "verificationCodeFound": False,
             }
     except:
         pass
@@ -295,7 +315,7 @@ def extract_ig(url_or_at):
     return None
 
 
-def scrape_instagram(username):
+def scrape_instagram(username, verification_code=None):
     username = username.lstrip("@")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -313,6 +333,11 @@ def scrape_instagram(username):
             data = r.json()
             user = data.get("data", {}).get("user", {})
             if user:
+                bio = user.get("biography", "")
+                verified = False
+                if verification_code and bio:
+                    verified = check_verification_code(bio, verification_code)
+                
                 return {
                     "success": True,
                     "platform": "instagram",
@@ -324,8 +349,10 @@ def scrape_instagram(username):
                     "post_count": format_count(user.get("edge_owner_to_timeline_media", {}).get("count", 0), "posts"),
                     "profile_url": f"https://instagram.com/{username}",
                     "profile_image": user.get("profile_pic_url_hd") or user.get("profile_pic_url") or f"https://unavatar.io/instagram/{username}",
-                    "bio": (user.get("biography") or "")[:250],
+                    "bio": bio[:250],
                     "method": "instagram_api",
+                    "verificationCodeFound": verified,
+                    "isVerified": user.get("is_verified", False),
                 }
     except Exception as e:
         print(f"Instagram API failed: {e}")
@@ -343,6 +370,7 @@ def scrape_instagram(username):
                 "profile_image": f"https://unavatar.io/instagram/{username}",
                 "bio": "Profile exists. Login required for stats.",
                 "method": "unavatar",
+                "verificationCodeFound": False,
             }
     except:
         pass
@@ -359,7 +387,7 @@ def extract_tt(url_or_at):
     return None
 
 
-def scrape_tiktok(username):
+def scrape_tiktok(username, verification_code=None):
     username = username.lstrip("@")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
@@ -372,6 +400,12 @@ def scrape_tiktok(username):
         info = data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["userInfo"]
         u = info["user"]
         s = info.get("stats", {})
+        
+        bio = u.get("signature", "")
+        verified = False
+        if verification_code and bio:
+            verified = check_verification_code(bio, verification_code)
+        
         return {
             "success": True,
             "platform": "tiktok",
@@ -381,11 +415,13 @@ def scrape_tiktok(username):
             "follower_count_exact": str(s.get("followerCount", 0)),
             "following_count": format_count(s.get("followingCount", 0), "following"),
             "video_count": format_count(s.get("videoCount", 0), "videos"),
-            "likes_count": format_count(s.get("heartCount", 0), "likes"),
+            "likes_count": str(s.get("heartCount", 0)),
             "profile_url": f"https://www.tiktok.com/@{username}",
             "profile_image": u.get("avatarLarger", f"https://unavatar.io/tiktok/{username}"),
-            "bio": u.get("signature", ""),
+            "bio": bio,
             "method": "tiktok_web",
+            "verificationCodeFound": verified,
+            "isVerified": u.get("verified", False),
         }
     except Exception:
         try:
@@ -400,6 +436,7 @@ def scrape_tiktok(username):
                     "profile_image": f"https://unavatar.io/tiktok/{username}",
                     "bio": "Profile exists",
                     "method": "unavatar",
+                    "verificationCodeFound": False,
                 }
         except:
             pass
@@ -412,10 +449,13 @@ def extract_tg(url_or_at):
     if m: return m.group(1)
     m = re.search(r"^@?([A-Za-z0-9_]+)$", url_or_at)
     if m: return m.group(1)
+    # Handle private channel IDs
+    m = re.search(r"^(-100\d+)$", url_or_at)
+    if m: return m.group(1)
     return None
 
 
-async def _tg_async(username):
+async def _tg_async(username, verification_code=None):
     if not TELEGRAM_AVAILABLE or not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING):
         return {"success": False, "error": "Telegram API not configured"}
 
@@ -437,6 +477,12 @@ async def _tg_async(username):
         if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
             full = await client(GetFullChannelRequest(entity))
             typ = ("Channel" if entity.broadcast else "Supergroup" if entity.megagroup else "Group")
+            
+            description = full.full_chat.about or ""
+            verified = False
+            if verification_code and description:
+                verified = check_verification_code(description, verification_code)
+            
             return {
                 "success": True,
                 "platform": "telegram",
@@ -445,24 +491,33 @@ async def _tg_async(username):
                 "type": typ,
                 "member_count": format_count(full.full_chat.participants_count, "members"),
                 "member_count_exact": str(full.full_chat.participants_count),
-                "description": full.full_chat.about or "",
+                "description": description,
+                "bio": description,
                 "profile_url": f"https://t.me/{username}",
                 "profile_image": avatar,
                 "method": "telethon",
+                "verificationCodeFound": verified,
             }
 
         full = await client(GetFullUserRequest(entity))
         name = f"{entity.first_name or ''} {entity.last_name or ''}".strip() or username
+        
+        bio = full.full_user.about or ""
+        verified = False
+        if verification_code and bio:
+            verified = check_verification_code(bio, verification_code)
+        
         return {
             "success": True,
             "platform": "telegram",
             "username": entity.username or username,
             "name": name,
             "type": "User",
-            "bio": full.full_user.about or "",
+            "bio": bio,
             "profile_url": f"https://t.me/{username}",
             "profile_image": avatar,
             "method": "telethon",
+            "verificationCodeFound": verified,
         }
     except UsernameNotOccupiedError:
         return {"success": False, "error": f"@{username} not found"}
@@ -474,11 +529,11 @@ async def _tg_async(username):
         await client.disconnect()
 
 
-def scrape_telegram(username):
-    return asyncio.run(_tg_async(username.lstrip("@")))
+def scrape_telegram(username, verification_code=None):
+    return asyncio.run(_tg_async(username.lstrip("@"), verification_code))
 
 
-# ==================== FACEBOOK (FIXED NAME EXTRACTION) ====================
+# ==================== FACEBOOK ====================
 def extract_fb(url_or_at):
     if re.search(r"facebook\.com/profile\.php", url_or_at, re.I):
         return None, "profile"
@@ -502,7 +557,7 @@ def extract_fb(url_or_at):
     return None, None
 
 
-def scrape_facebook(identifier, entity_type="page"):
+def scrape_facebook(identifier, entity_type="page", verification_code=None):
     if entity_type == "profile":
         return {"success": False, "error": "❌ Personal profiles not supported"}
 
@@ -527,19 +582,14 @@ def scrape_facebook(identifier, entity_type="page"):
         if r.status_code == 200 and "login" not in r.url.lower():
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # Extract name - FIXED
+            # Extract name
             name = identifier.replace("_", " ").replace("-", " ").title()
-            
-            # Method 1: Title tag (most reliable)
             title = soup.find("title")
             if title:
                 title_text = title.get_text(strip=True)
-                # Remove " - Facebook" or " | Facebook"
                 name = re.sub(r"\s*[-|]\s*Facebook\s*$", "", title_text, flags=re.I).strip()
-                # Remove any trailing parentheses content
                 name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
             
-            # Method 2: H3 or H1 tags
             if not name or name == identifier:
                 for tag in soup.find_all(["h1", "h3"], limit=5):
                     text = tag.get_text(strip=True)
@@ -554,6 +604,17 @@ def scrape_facebook(identifier, entity_type="page"):
                 if "scontent" in src or ("fbcdn" in src and "https://" in src):
                     avatar = src
                     break
+
+            # Bio/Description
+            bio = ""
+            meta_desc = soup.find("meta", {"name": "description"})
+            if meta_desc:
+                bio = meta_desc.get("content", "")[:300]
+            
+            # Check verification code in bio
+            verified = False
+            if verification_code and bio:
+                verified = check_verification_code(bio, verification_code)
 
             # Stats
             is_group = entity_type == "group" or "/groups/" in r.url
@@ -577,12 +638,6 @@ def scrape_facebook(identifier, entity_type="page"):
                         count = format_count(parsed, count_label)
                         break
 
-            # Bio
-            bio = ""
-            meta_desc = soup.find("meta", {"name": "description"})
-            if meta_desc:
-                bio = meta_desc.get("content", "")[:300]
-            
             print(f"  ✓ Found: {name}, {count}")
             
             return {
@@ -593,14 +648,19 @@ def scrape_facebook(identifier, entity_type="page"):
                 "type": "Group" if is_group else "Page",
                 "count": count,
                 "count_exact": count_exact,
+                "follower_count_exact": count_exact,
+                "member_count_exact": count_exact,
                 "count_label": count_label,
                 "profile_url": base_url,
                 "profile_image": avatar,
                 "bio": bio or "Facebook Page/Group",
                 "method": "facebook_mbasic",
+                "verificationCodeFound": verified,
             }
     except Exception as e:
         print(f"  mbasic error: {e}")
+
+
 
     # STRATEGY 2: Desktop
     try:
