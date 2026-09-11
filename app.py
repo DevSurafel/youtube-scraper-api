@@ -195,9 +195,11 @@ def yt_by_handle(handle, verification_code=None):
 
 # ==================== TWITTER ====================
 NITTER_INSTANCES = [
-    "https://nitter.lucabased.xyz",
-    "https://nitter.poast.org",
-    "https://nitter.privacydev.net",
+    "https://nitter.net",
+    "https://nitter.kavin.rocks",
+    "https://nitter.unixfox.eu",
+    "https://nitter.1d4.us",
+    "https://nitter.esmailelbob.xyz",
 ]
 
 USER_AGENTS = [
