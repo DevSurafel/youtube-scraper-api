@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v26 (INSTAGRAM FIX)
+# app.py – Social-Media Stats API v27 (TWITTER + INSTAGRAM FIX)
 # --------------------------------------------------------------
 
 import os
@@ -223,11 +223,88 @@ def extract_tw(url_or_at):
     return None
 
 
+# ---------- NEW: Twitter syndication endpoint (no login, no scraping) ----------
+def scrape_twitter_syndication(username, verification_code=None):
+    """Most reliable Twitter/X method in 2025 — public syndication widget."""
+    username = username.lstrip("@").strip()
+    if not username:
+        return None
+    try:
+        url = f"https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={username}"
+        r = requests.get(
+            url,
+            headers={"User-Agent": random.choice(USER_AGENTS)},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            print(f"  [Twitter syndication] HTTP {r.status_code}")
+            return None
+        data = r.json()
+        if not data or not isinstance(data, list):
+            print(f"  [Twitter syndication] Empty/invalid response")
+            return None
+        u = data[0]
+        followers = int(u.get("followers_count", 0) or 0)
+
+        # Get full bio via oembed (syndication doesn't return it)
+        bio = ""
+        try:
+            oembed = requests.get(
+                f"https://publish.twitter.com/oembed?url=https://twitter.com/{username}",
+                timeout=8,
+                headers={"User-Agent": random.choice(USER_AGENTS)},
+            ).json()
+            bio = re.sub(r"<[^>]+>", "", oembed.get("description", "") or "")[:300]
+        except Exception:
+            pass
+
+        verified = False
+        if verification_code and bio:
+            verified = check_verification_code(bio, verification_code)
+
+        avatar_raw = (u.get("profile_image_url_https") or "").replace("_normal", "_400x400")
+        from urllib.parse import quote
+        app_base = get_base_url()
+        if avatar_raw:
+            avatar = f"{app_base}/api/proxy-image?url={quote(avatar_raw)}"
+        else:
+            avatar = f"https://unavatar.io/twitter/{username}"
+
+        print(f"  [Twitter syndication] SUCCESS: {u.get('name', username)} | {format_count(followers, 'followers')}")
+
+        return {
+            "success": True,
+            "platform": "twitter",
+            "username": username,
+            "name": u.get("name", username),
+            "bio": bio,
+            "follower_count": format_count(followers, "followers"),
+            "follower_count_exact": str(followers),
+            "following_count": "Hidden",
+            "tweet_count": "Hidden",
+            "profile_url": f"https://twitter.com/{username}",
+            "profile_image": avatar,
+            "method": "syndication",
+            "verificationCodeFound": verified,
+            "isVerified": bool(u.get("verified", False)),
+        }
+    except Exception as e:
+        print(f"  [Twitter syndication] Error: {e}")
+        return None
+
+
 def scrape_twitter(username, verification_code=None):
     username = username.lstrip("@").strip()
     if not username:
         return {"success": False, "error": "Empty username"}
 
+    # ⭐ STRATEGY 0: syndication (most reliable, no login)
+    synd = scrape_twitter_syndication(username, verification_code)
+    if synd:
+        return synd
+
+    # STRATEGY 1: Nitter instances (kept as fallback)
+    base = NITTER_INSTANCES[0]  # ← default, prevents NameError in avatar fallback
     instances = NITTER_INSTANCES.copy()
     random.shuffle(instances)
 
@@ -417,11 +494,103 @@ def extract_ig(url_or_at):
     return None
 
 
+# ---------- NEW: Instagram API helper (no login required, tries both hosts) ----------
+def _format_ig_user(user, username, verification_code):
+    bio = user.get("biography", "") or ""
+    verified = bool(verification_code and check_verification_code(bio, verification_code))
+
+    img = user.get("profile_pic_url_hd") or user.get("profile_pic_url") or ""
+    from urllib.parse import quote
+    app_base = get_base_url()
+    if img and img.startswith("http"):
+        img = f"{app_base}/api/proxy-image?url={quote(img)}"
+    else:
+        img = f"https://unavatar.io/instagram/{username}"
+
+    followers = user.get("edge_followed_by", {}).get("count", 0)
+    following = user.get("edge_follow", {}).get("count", 0)
+    posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
+
+    return {
+        "success": True,
+        "platform": "instagram",
+        "username": username,
+        "name": user.get("full_name") or username,
+        "follower_count": format_count(followers, "followers"),
+        "follower_count_exact": str(followers),
+        "following_count": format_count(following, "following"),
+        "post_count": format_count(posts, "posts"),
+        "profile_url": f"https://instagram.com/{username}",
+        "profile_image": img,
+        "bio": bio[:250],
+        "method": "instagram_api",
+        "verificationCodeFound": verified,
+        "isVerified": user.get("is_verified", False),
+    }
+
+
+def scrape_instagram_api(username, verification_code=None):
+    """Try Instagram's web_profile_info endpoint on both hosts."""
+    username = username.lstrip("@").strip()
+    if not username:
+        return None
+
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "x-ig-app-id": "936619743392459",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"https://www.instagram.com/{username}/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+    }
+
+    hosts = [
+        "https://i.instagram.com",
+        "https://www.instagram.com",
+    ]
+
+    for host in hosts:
+        try:
+            url = f"{host}/api/v1/users/web_profile_info/?username={username}"
+            print(f"  [IG API] Trying {host}...")
+            # dummy session cookie sometimes satisfies the gate
+            r = requests.get(
+                url,
+                headers=base_headers,
+                cookies={"sessionid": "0", "csrftoken": "0"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                print(f"  [IG API] {host} → HTTP {r.status_code}")
+                continue
+
+            data = r.json()
+            user = data.get("data", {}).get("user")
+            if user:
+                print(f"  [IG API] SUCCESS via {host}: {user.get('full_name', username)}")
+                return _format_ig_user(user, username, verification_code)
+            else:
+                print(f"  [IG API] {host} → no user object")
+        except Exception as e:
+            print(f"  [IG API] {host} error: {e}")
+
+    return None
+
+
 def scrape_instagram(username, verification_code=None):
     username = username.lstrip("@").strip()
     print(f"[Instagram] Scraping @{username}...")
-    
-    # STRATEGY 1: Official Instagram API (most reliable)
+
+    # ⭐ STRATEGY 0: Instagram API (both hosts)
+    api_result = scrape_instagram_api(username, verification_code)
+    if api_result:
+        return api_result
+
+    # STRATEGY 1: Official Instagram API (legacy attempt, kept as fallback)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept": "*/*",
@@ -1103,20 +1272,21 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "26.0 - INSTAGRAM PROFILE IMAGE FIX + RELIABILITY",
+        "version": "27.0 - TWITTER SYNDICATION + INSTAGRAM API FIX",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
             "/api/youtube": "POST – YouTube only",
-            "/api/twitter": "POST – Twitter/X",
-            "/api/instagram": "POST – Instagram (FIXED profile images + 3-tier fallback)",
+            "/api/twitter": "POST – Twitter/X (syndication + Nitter fallback)",
+            "/api/instagram": "POST – Instagram (API + 3-tier fallback)",
             "/api/tiktok": "POST – TikTok",
             "/api/telegram": "POST – Telegram",
             "/api/facebook": "POST – Facebook (Pages & Groups)",
             "/api/health": "GET – health check",
         },
         "fixes": {
-            "instagram": "Fixed profile image extraction with proxy + 3 fallback strategies for reliability",
+            "twitter": "Added cdn.syndication.twimg.com widget API as primary method (works without login)",
+            "instagram": "Added web_profile_info API on both i.instagram.com and www.instagram.com with dummy session cookie",
             "reliability": "Better error handling and multiple scraping strategies per platform"
         }
     })
