@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v27 (TWITTER + INSTAGRAM FIX)
+# app.py – Social-Media Stats API v28 (TWITTER + INSTAGRAM RELIABILITY)
 # --------------------------------------------------------------
 
 
@@ -39,6 +39,23 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 BASE_URL = os.getenv("BASE_URL", "")
+# Optional: a residential/rotating proxy, e.g. http://user:pass@host:port  (Instagram and X block most
+# datacenter IPs such as Render, so a proxy is the single biggest reliability boost if lookups still fail)
+SCRAPER_PROXY = os.getenv("SCRAPER_PROXY", "")
+PROXIES = {"http": SCRAPER_PROXY, "https": SCRAPER_PROXY} if SCRAPER_PROXY else None
+ALLOWED_IMAGE_HOSTS = (
+    "twimg.com", "cdninstagram.com", "fbcdn.net", "instagram.com", "tiktokcdn.com",
+    "tiktokcdn-us.com", "unavatar.io", "ggpht.com", "googleusercontent.com", "nitter.net",
+)
+
+
+def http_get(url, **kw):
+    """requests.get that goes through SCRAPER_PROXY when configured."""
+    kw.setdefault("timeout", 15)
+    if PROXIES:
+        kw.setdefault("proxies", PROXIES)
+    return requests.get(url, **kw)
+
 
 # ------------------------------------------------
 def async_route(f):
@@ -107,12 +124,16 @@ def proxy_image():
         return jsonify({"error": "Missing url parameter"}), 400
     
     try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        if urlparse(url).scheme not in ("http", "https") or not any(host == h or host.endswith("." + h) for h in ALLOWED_IMAGE_HOSTS):
+            return jsonify({"error": "Image host not allowed"}), 400
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": url.split("/pic/")[0] if "/pic/" in url else url,
         }
-        
-        r = requests.get(url, headers=headers, timeout=10, stream=True)
+
+        r = http_get(url, headers=headers, timeout=10)
         
         if r.status_code != 200:
             return jsonify({"error": "Failed to fetch image"}), r.status_code
@@ -234,7 +255,7 @@ def scrape_twitter_syndication(username, verification_code=None):
         return None
     try:
         url = f"https://cdn.syndication.twimg.com/widgets/followbutton/info.json?screen_names={username}"
-        r = requests.get(
+        r = http_get(
             url,
             headers={"User-Agent": random.choice(USER_AGENTS)},
             timeout=10,
@@ -296,10 +317,106 @@ def scrape_twitter_syndication(username, verification_code=None):
         return None
 
 
+def _proxy_avatar(raw, fallback):
+    from urllib.parse import quote
+    if raw and raw.startswith("http"):
+        return f"{get_base_url()}/api/proxy-image?url={quote(raw)}"
+    return fallback
+
+
+def scrape_twitter_fx(username, verification_code=None):
+    """FixTweet public API: returns followers, bio and avatar as JSON, no login."""
+    try:
+        r = http_get(f"https://api.fxtwitter.com/{username}", headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=12)
+        if r.status_code != 200:
+            print(f"  [Twitter fx] HTTP {r.status_code}")
+            return None
+        u = (r.json() or {}).get("user")
+        if not u:
+            return None
+        followers = int(u.get("followers") or 0)
+        bio = (u.get("description") or "")[:300]
+        verification = u.get("verification") or {}
+        avatar_raw = (u.get("avatar_url") or "").replace("_normal", "_400x400")
+        return {
+            "success": True,
+            "platform": "twitter",
+            "username": u.get("screen_name") or username,
+            "name": u.get("name") or username,
+            "bio": bio,
+            "follower_count": format_count(followers, "followers"),
+            "follower_count_exact": str(followers),
+            "following_count": format_count(u.get("following") or 0, "following"),
+            "tweet_count": str(u.get("tweets") or 0),
+            "likes_count": str(u.get("likes") or 0),
+            "profile_url": f"https://twitter.com/{username}",
+            "profile_image": _proxy_avatar(avatar_raw, f"https://unavatar.io/twitter/{username}"),
+            "method": "fxtwitter",
+            "verificationCodeFound": bool(verification_code and check_verification_code(bio, verification_code)),
+            "isVerified": bool(verification.get("verified")),
+        }
+    except Exception as e:
+        print(f"  [Twitter fx] Error: {e}")
+        return None
+
+
+def scrape_twitter_timeline(username, verification_code=None):
+    """Public embedded-timeline page; its __NEXT_DATA__ holds the profile."""
+    try:
+        r = http_get(
+            f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}",
+            headers={"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            print(f"  [Twitter timeline] HTTP {r.status_code}")
+            return None
+        m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', r.text, re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(1))
+        entries = data["props"]["pageProps"]["timeline"]["entries"]
+        user = None
+        for e in entries:
+            user = (((e.get("content") or {}).get("tweet") or {}).get("user"))
+            if user:
+                break
+        if not user:
+            return None
+        followers = int(user.get("followers_count") or 0)
+        bio = (user.get("description") or "")[:300]
+        avatar_raw = (user.get("profile_image_url_https") or "").replace("_normal", "_400x400")
+        return {
+            "success": True,
+            "platform": "twitter",
+            "username": user.get("screen_name") or username,
+            "name": user.get("name") or username,
+            "bio": bio,
+            "follower_count": format_count(followers, "followers"),
+            "follower_count_exact": str(followers),
+            "following_count": format_count(user.get("friends_count") or 0, "following"),
+            "tweet_count": str(user.get("statuses_count") or 0),
+            "profile_url": f"https://twitter.com/{username}",
+            "profile_image": _proxy_avatar(avatar_raw, f"https://unavatar.io/twitter/{username}"),
+            "method": "syndication_timeline",
+            "verificationCodeFound": bool(verification_code and check_verification_code(bio, verification_code)),
+            "isVerified": bool(user.get("verified") or user.get("is_blue_verified")),
+        }
+    except Exception as e:
+        print(f"  [Twitter timeline] Error: {e}")
+        return None
+
+
 def scrape_twitter(username, verification_code=None):
     username = username.lstrip("@").strip()
     if not username:
         return {"success": False, "error": "Empty username"}
+
+    # STRATEGY A: FixTweet JSON API, then embedded timeline page
+    for strategy in (scrape_twitter_fx, scrape_twitter_timeline):
+        res = strategy(username, verification_code)
+        if res:
+            return res
 
     # ⭐ STRATEGY 0: syndication (most reliable, no login)
     synd = scrape_twitter_syndication(username, verification_code)
@@ -315,7 +432,7 @@ def scrape_twitter(username, verification_code=None):
         try:
             url = f"{base}/{username}"
             print(f"[Twitter] Trying {base} for @{username}...")
-            r = requests.get(url, headers=_random_headers(), timeout=12, allow_redirects=True)
+            r = http_get(url, headers=_random_headers(), timeout=12, allow_redirects=True)
 
             if "Just a moment..." in r.text or "Checking your browser" in r.text:
                 print("  Cloudflare challenge → skip")
@@ -465,27 +582,9 @@ def scrape_twitter(username, verification_code=None):
             print(f"  Error on {base}: {e}")
             continue
 
-    try:
-        head = requests.head(f"https://unavatar.io/twitter/{username}", timeout=5)
-        if head.status_code == 200:
-            return {
-                "success": True,
-                "platform": "twitter",
-                "username": username,
-                "name": username,
-                "follower_count": "Hidden",
-                "following_count": "Hidden",
-                "tweet_count": "Hidden",
-                "profile_url": f"https://twitter.com/{username}",
-                "profile_image": f"https://unavatar.io/twitter/{username}",
-                "bio": "Profile exists – stats hidden.",
-                "method": "unavatar",
-                "verificationCodeFound": False,
-            }
-    except:
-        pass
-
-    return {"success": False, "error": f"@{username} not found on any Nitter instance"}
+    # No source could read the profile. Do NOT pretend success: the site then lets the seller enter the
+    # details manually and prove ownership with a screenshot.
+    return {"success": False, "error": f"Could not read @{username} right now. Enter the details manually."}
 
 
 # ==================== INSTAGRAM (FIXED) ====================
@@ -561,7 +660,7 @@ def scrape_instagram_api(username, verification_code=None):
             url = f"{host}/api/v1/users/web_profile_info/?username={username}"
             print(f"  [IG API] Trying {host}...")
             # dummy session cookie sometimes satisfies the gate
-            r = requests.get(
+            r = http_get(
                 url,
                 headers=base_headers,
                 cookies={"sessionid": "0", "csrftoken": "0"},
@@ -584,177 +683,87 @@ def scrape_instagram_api(username, verification_code=None):
     return None
 
 
+def scrape_instagram_meta(username, verification_code=None):
+    """Public profile page: og:description carries 'N Followers, N Following, N Posts - Name (@user) on Instagram: "bio"'."""
+    from html import unescape
+    uas = [
+        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        random.choice(USER_AGENTS),
+    ]
+    for ua in uas:
+        try:
+            r = http_get(
+                f"https://www.instagram.com/{username}/",
+                headers={"User-Agent": ua, "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                print(f"  [IG meta] {ua[:20]}... HTTP {r.status_code}")
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            og_desc = soup.find("meta", property="og:description")
+            og_title = soup.find("meta", property="og:title")
+            og_img = soup.find("meta", property="og:image")
+            if not og_desc or not og_desc.get("content"):
+                continue
+            desc = unescape(og_desc["content"])
+            m = re.search(r"([\d.,]+[KMB]?)\s+Followers?,\s+([\d.,]+[KMB]?)\s+Following,\s+([\d.,]+[KMB]?)\s+Posts?", desc, re.I)
+            if not m:
+                continue
+            followers = parse_count(m.group(1).replace(",", ""))
+            following = parse_count(m.group(2).replace(",", ""))
+            posts = parse_count(m.group(3).replace(",", ""))
+            bio = ""
+            bm = re.search(r'on Instagram:\s*["\u201c](.*)["\u201d]\s*$', desc, re.S)
+            if bm:
+                bio = bm.group(1).strip()
+            name = username
+            if og_title and og_title.get("content"):
+                tm = re.match(r"^(.*?)\s*\(@", unescape(og_title["content"]))
+                if tm and tm.group(1).strip():
+                    name = tm.group(1).strip()
+            img_raw = og_img.get("content") if og_img else ""
+            print(f"  [IG meta] SUCCESS: {name} | {followers}")
+            return {
+                "success": True,
+                "platform": "instagram",
+                "username": username,
+                "name": name,
+                "follower_count": format_count(followers, "followers"),
+                "follower_count_exact": str(followers),
+                "following_count": format_count(following, "following"),
+                "post_count": format_count(posts, "posts"),
+                "profile_url": f"https://instagram.com/{username}",
+                "profile_image": _proxy_avatar(img_raw, f"https://unavatar.io/instagram/{username}"),
+                "bio": bio[:250],
+                "method": "instagram_meta",
+                "verificationCodeFound": bool(verification_code and check_verification_code(bio, verification_code)),
+                "isVerified": False,
+            }
+        except Exception as e:
+            print(f"  [IG meta] error: {e}")
+    return None
+
+
 def scrape_instagram(username, verification_code=None):
     username = username.lstrip("@").strip()
     print(f"[Instagram] Scraping @{username}...")
+
+    # STRATEGY 0a: public profile meta tags (works for many public accounts without login)
+    meta_result = scrape_instagram_meta(username, verification_code)
+    if meta_result:
+        return meta_result
 
     # ⭐ STRATEGY 0: Instagram API (both hosts)
     api_result = scrape_instagram_api(username, verification_code)
     if api_result:
         return api_result
 
-    # STRATEGY 1: Official Instagram API (legacy attempt, kept as fallback)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.instagram.com/",
-        "x-ig-app-id": "936619743392459",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site",
-    }
-
-    try:
-        print(f"  [Strategy 1] Trying Instagram API...")
-        api_url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-        r = requests.get(api_url, headers=headers, timeout=20)
-        
-        if r.status_code == 200:
-            data = r.json()
-            user = data.get("data", {}).get("user", {})
-            
-            if user:
-                bio = user.get("biography", "")
-                verified = False
-                if verification_code and bio:
-                    verified = check_verification_code(bio, verification_code)
-
-                # Extract profile image - try multiple fields
-                profile_image = None
-                
-                # Try HD version first
-                if user.get("profile_pic_url_hd"):
-                    profile_image = user.get("profile_pic_url_hd")
-                    print(f"  [Profile Image] Found HD: {profile_image[:80]}...")
-                # Fallback to regular version
-                elif user.get("profile_pic_url"):
-                    profile_image = user.get("profile_pic_url")
-                    print(f"  [Profile Image] Found regular: {profile_image[:80]}...")
-                
-                # If Instagram image found, proxy it for CORS
-                if profile_image and profile_image.startswith("http"):
-                    from urllib.parse import quote
-                    app_base = get_base_url()
-                    original_image = profile_image
-                    profile_image = f"{app_base}/api/proxy-image?url={quote(original_image)}"
-                    print(f"  [Profile Image] Proxied: {original_image[:60]}... → {profile_image[:80]}...")
-                else:
-                    # Fallback to unavatar
-                    profile_image = f"https://unavatar.io/instagram/{username}"
-                    print(f"  [Profile Image] Using unavatar fallback")
-
-                followers = user.get("edge_followed_by", {}).get("count", 0)
-                following = user.get("edge_follow", {}).get("count", 0)
-                posts = user.get("edge_owner_to_timeline_media", {}).get("count", 0)
-
-                print(f"  SUCCESS: {user.get('full_name', username)} | {format_count(followers, 'followers')}")
-
-                return {
-                    "success": True,
-                    "platform": "instagram",
-                    "username": username,
-                    "name": user.get("full_name") or username,
-                    "follower_count": format_count(followers, "followers"),
-                    "follower_count_exact": str(followers),
-                    "following_count": format_count(following, "following"),
-                    "post_count": format_count(posts, "posts"),
-                    "profile_url": f"https://instagram.com/{username}",
-                    "profile_image": profile_image,
-                    "bio": bio[:250],
-                    "method": "instagram_api",
-                    "verificationCodeFound": verified,
-                    "isVerified": user.get("is_verified", False),
-                }
-        
-        print(f"  [Strategy 1] API failed with status {r.status_code}")
-    
-    except Exception as e:
-        print(f"  [Strategy 1] Instagram API error: {e}")
-
-    # STRATEGY 2: Web Scraping (fallback)
-    try:
-        print(f"  [Strategy 2] Trying web scraping...")
-        web_url = f"https://www.instagram.com/{username}/"
-        web_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        
-        r = requests.get(web_url, headers=web_headers, timeout=15)
-        
-        if r.status_code == 200:
-            # Try to extract JSON data from page
-            json_match = re.search(r'<script type="application/ld\+json">(.+?)</script>', r.text, re.DOTALL)
-            if json_match:
-                try:
-                    json_data = json.loads(json_match.group(1))
-                    if isinstance(json_data, dict):
-                        profile_image = json_data.get("image")
-                        name = json_data.get("name", username)
-                        bio = json_data.get("description", "")
-                        
-                        # Proxy the image
-                        if profile_image and profile_image.startswith("http"):
-                            from urllib.parse import quote
-                            app_base = get_base_url()
-                            profile_image = f"{app_base}/api/proxy-image?url={quote(profile_image)}"
-                        else:
-                            profile_image = f"https://unavatar.io/instagram/{username}"
-                        
-                        verified = False
-                        if verification_code and bio:
-                            verified = check_verification_code(bio, verification_code)
-                        
-                        print(f"  SUCCESS (web scrape): {name}")
-                        
-                        return {
-                            "success": True,
-                            "platform": "instagram",
-                            "username": username,
-                            "name": name,
-                            "follower_count": "Hidden",
-                            "profile_url": f"https://instagram.com/{username}",
-                            "profile_image": profile_image,
-                            "bio": bio[:250],
-                            "method": "instagram_web_scrape",
-                            "verificationCodeFound": verified,
-                            "isVerified": False,
-                        }
-                except:
-                    pass
-        
-        print(f"  [Strategy 2] Web scrape failed")
-    
-    except Exception as e:
-        print(f"  [Strategy 2] Web scraping error: {e}")
-
-    # STRATEGY 3: Unavatar fallback
-    try:
-        print(f"  [Strategy 3] Trying unavatar fallback...")
-        unavatar_url = f"https://unavatar.io/instagram/{username}"
-        head = requests.head(unavatar_url, timeout=5)
-        
-        if head.status_code == 200:
-            print(f"  SUCCESS (unavatar): Profile exists")
-            return {
-                "success": True,
-                "platform": "instagram",
-                "username": username,
-                "name": username.replace("_", " ").title(),
-                "follower_count": "Hidden",
-                "profile_url": f"https://instagram.com/{username}",
-                "profile_image": unavatar_url,
-                "bio": "Profile exists. Login required for stats.",
-                "method": "unavatar",
-                "verificationCodeFound": False,
-            }
-    except Exception as e:
-        print(f"  [Strategy 3] Unavatar error: {e}")
-
-    print(f"  FAILED: All strategies failed for @{username}")
-    return {"success": False, "error": f"Cannot access @{username}. Try again in a few seconds."}
+    # Nothing could read the profile (Instagram blocks most server IPs). Do NOT pretend success:
+    # the site then lets the seller enter the details manually and prove ownership with a screenshot.
+    print(f"  FAILED: all strategies failed for @{username}")
+    return {"success": False, "error": f"Could not read @{username} right now. Enter the details manually."}
 
 
 # ==================== TIKTOK ====================
@@ -1275,7 +1284,7 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "27.0 - TWITTER SYNDICATION + INSTAGRAM API FIX",
+        "version": "28.0 - FXTWITTER + IG META + MANUAL FALLBACK",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
@@ -1296,4 +1305,4 @@ def info():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5001")), debug=os.getenv("FLASK_DEBUG") == "1")
