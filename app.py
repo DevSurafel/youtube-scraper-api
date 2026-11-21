@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# app.py – Social-Media Stats API v28 (TWITTER + INSTAGRAM RELIABILITY)
+# app.py – Social-Media Stats API v29 (FLEXIBLE LINKS + RETRIES)
 # --------------------------------------------------------------
 
 
@@ -72,6 +72,70 @@ def get_base_url():
     if request:
         return request.url_root.rstrip('/')
     return ""
+
+
+# ==================== LINK PARSING ====================
+from urllib.parse import urlparse, parse_qs, unquote
+
+PLATFORM_HOSTS = {
+    "instagram": ("instagram.com", "instagr.am"),
+    "youtube": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
+    "tiktok": ("tiktok.com",),
+    "twitter": ("twitter.com", "x.com"),
+    "facebook": ("facebook.com", "fb.com", "fb.me", "fb.watch"),
+    "telegram": ("t.me", "telegram.me", "telegram.dog"),
+}
+
+
+def parse_link(raw):
+    """Accepts a link in almost any form (no https, mobile host, extra path, tracking params, tg://)
+    and returns (host, [path segments], {query}). Host has www./m./mobile./web. removed."""
+    raw = (raw or "").strip()
+    m = re.match(r"^tg://resolve\?domain=([A-Za-z0-9_]+)", raw, re.I)
+    if m:
+        return "t.me", [m.group(1)], {}
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", raw, re.I):
+        raw = "https://" + raw.lstrip("/")
+    try:
+        u = urlparse(raw)
+    except Exception:
+        return "", [], {}
+    host = (u.hostname or "").lower()
+    for pre in ("www.", "m.", "mobile.", "web.", "mbasic.", "touch."):
+        if host.startswith(pre):
+            host = host[len(pre):]
+    segs = [unquote(x) for x in u.path.split("/") if x]
+    q = {k: v[0] for k, v in parse_qs(u.query).items()}
+    return host, segs, q
+
+
+def host_matches(host, platform):
+    return any(host == h or host.endswith("." + h) for h in PLATFORM_HOSTS[platform])
+
+
+def detect_platform(raw):
+    host, _, _ = parse_link(raw)
+    for p in PLATFORM_HOSTS:
+        if host_matches(host, p):
+            return p
+    return None
+
+
+def with_retry(fn, attempts=2, delay=1.2):
+    """Run a scraper again when it fails: these sites fail randomly."""
+    import time
+    res = None
+    for i in range(attempts):
+        try:
+            res = fn()
+        except Exception as e:
+            print(f"  [retry] attempt {i+1} crashed: {e}")
+            res = {"success": False, "error": str(e)}
+        if res and res.get("success"):
+            return res
+        if i < attempts - 1:
+            time.sleep(delay)
+    return res
 
 
 # ==================== HELPERS ====================
@@ -155,10 +219,24 @@ def proxy_image():
 
 # ==================== YOUTUBE ====================
 def extract_yt(url):
-    m = re.search(r"youtube\.com/channel/(UC[\w-]+)", url)
-    if m: return m.group(1), "id"
-    m = re.search(r"youtube\.com/@([\w-]+)", url)
-    if m: return m.group(1), "handle"
+    """Returns (value, type) where type is id | handle | user | custom.
+    Handles /channel/UC..., /@handle, /c/name, /user/name, bare /name, trailing /videos /about etc."""
+    host, segs, q = parse_link(url)
+    if url.strip().startswith("@") and "/" not in url:
+        return url.strip().lstrip("@"), "handle"
+    if not host_matches(host, "youtube") or not segs:
+        return None, None
+    first = segs[0]
+    if first.startswith("@") and len(first) > 1:
+        return first[1:], "handle"
+    if first == "channel" and len(segs) > 1:
+        return segs[1], "id"
+    if first == "c" and len(segs) > 1:
+        return segs[1], "custom"
+    if first == "user" and len(segs) > 1:
+        return segs[1], "user"
+    if first not in {"watch", "playlist", "results", "feed", "shorts", "live", "embed", "channel", "c", "user", "@"} and not host.startswith("youtu.be"):
+        return first, "custom"  # youtube.com/SomeName
     return None, None
 
 
@@ -199,19 +277,55 @@ def yt_by_id(cid, verification_code=None):
     }
 
 
+def _yt_first_channel_id(params):
+    r = http_get("https://www.googleapis.com/youtube/v3/channels", params={**params, "part": "id", "key": YOUTUBE_API_KEY}, timeout=10).json()
+    items = r.get("items") or []
+    return items[0]["id"] if items else None
+
+
 def yt_by_handle(handle, verification_code=None):
     if not YOUTUBE_API_KEY:
         return {"success": False, "error": "YouTube API key missing"}
-    r = requests.get(
-        "https://www.googleapis.com/youtube/v3/search",
-        params={"part": "snippet", "q": handle.lstrip("@"), "type": "channel",
-                "key": YOUTUBE_API_KEY, "maxResults": 1},
-        timeout=10,
-    ).json()
-    if not r.get("items"):
-        return {"success": False, "error": "Channel not found"}
-    cid = r["items"][0]["snippet"]["channelId"]
+    h = handle.lstrip("@")
+    cid = _yt_first_channel_id({"forHandle": "@" + h})  # exact, official lookup
+    if not cid:
+        r = http_get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params={"part": "snippet", "q": h, "type": "channel", "key": YOUTUBE_API_KEY, "maxResults": 1},
+            timeout=10,
+        ).json()
+        if not r.get("items"):
+            return {"success": False, "error": "Channel not found"}
+        cid = r["items"][0]["snippet"]["channelId"]
     return yt_by_id(cid, verification_code)
+
+
+def yt_by_username(name, verification_code=None):
+    """Old-style /user/name links."""
+    if not YOUTUBE_API_KEY:
+        return {"success": False, "error": "YouTube API key missing"}
+    cid = _yt_first_channel_id({"forUsername": name})
+    if not cid:
+        return yt_by_handle(name, verification_code)
+    return yt_by_id(cid, verification_code)
+
+
+def yt_by_custom(name, verification_code=None):
+    """/c/name or youtube.com/name: try it as a handle first, then as an old username, then search."""
+    res = yt_by_handle(name, verification_code)
+    if res.get("success"):
+        return res
+    return yt_by_username(name, verification_code)
+
+
+def yt_lookup(value, typ, verification_code=None):
+    if typ == "id":
+        return yt_by_id(value, verification_code)
+    if typ == "handle":
+        return yt_by_handle(value, verification_code)
+    if typ == "user":
+        return yt_by_username(value, verification_code)
+    return yt_by_custom(value, verification_code)
 
 
 # ==================== TWITTER ====================
@@ -239,12 +353,24 @@ def _random_headers():
         "Upgrade-Insecure-Requests": "1",
     }
 
+TW_RESERVED = {"home", "explore", "i", "search", "settings", "intent", "share", "hashtag", "messages",
+               "notifications", "login", "signup", "tos", "privacy", "compose", "about", "download"}
+
+
 def extract_tw(url_or_at):
-    m = re.search(r"(?:twitter\.com|x\.com)/([A-Za-z0-9_]+)", url_or_at)
-    if m: return m.group(1)
-    m = re.search(r"^@?([A-Za-z0-9_]+)$", url_or_at)
-    if m: return m.group(1)
-    return None
+    raw = (url_or_at or "").strip()
+    m = re.match(r"^@?([A-Za-z0-9_]{1,15})$", raw)
+    if m:
+        return m.group(1)
+    host, segs, _ = parse_link(raw)
+    if not host_matches(host, "twitter") and host not in ("fxtwitter.com", "vxtwitter.com", "nitter.net"):
+        return None
+    if not segs:
+        return None
+    first = segs[0].lstrip("@")
+    if first.lower() in TW_RESERVED:
+        return None
+    return first if re.match(r"^[A-Za-z0-9_]{1,15}$", first) else None
 
 
 # ---------- NEW: Twitter syndication endpoint (no login, no scraping) ----------
@@ -588,12 +714,23 @@ def scrape_twitter(username, verification_code=None):
 
 
 # ==================== INSTAGRAM (FIXED) ====================
+IG_RESERVED = {"p", "reel", "reels", "explore", "accounts", "direct", "tv", "about", "web", "developer", "legal", "challenge"}
+
+
 def extract_ig(url_or_at):
-    m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", url_or_at)
-    if m: return m.group(1)
-    m = re.search(r"^@?([A-Za-z0-9_.]+)$", url_or_at)
-    if m: return m.group(1)
-    return None
+    raw = (url_or_at or "").strip()
+    m = re.match(r"^@?([A-Za-z0-9_.]{1,30})$", raw)
+    if m and detect_platform(raw) is None:
+        return m.group(1)
+    host, segs, _ = parse_link(raw)
+    if not host_matches(host, "instagram") or not segs:
+        return m.group(1) if m else None
+    first = segs[0].lstrip("@")
+    if first == "stories" and len(segs) > 1:
+        first = segs[1]
+    if first.lower() in IG_RESERVED:
+        return None
+    return first if re.match(r"^[A-Za-z0-9_.]{1,30}$", first) else None
 
 
 # ---------- NEW: Instagram API helper (no login required, tries both hosts) ----------
@@ -768,10 +905,23 @@ def scrape_instagram(username, verification_code=None):
 
 # ==================== TIKTOK ====================
 def extract_tt(url_or_at):
-    m = re.search(r"tiktok\.com/@([A-Za-z0-9_.]+)", url_or_at)
-    if m: return m.group(1)
-    m = re.search(r"^@?([A-Za-z0-9_.]+)$", url_or_at)
-    if m: return m.group(1)
+    raw = (url_or_at or "").strip()
+    m = re.match(r"^@?([A-Za-z0-9_.]{2,24})$", raw)
+    if m:
+        return m.group(1)
+    host, segs, _ = parse_link(raw)
+    if host in ("vm.tiktok.com", "vt.tiktok.com") or (host_matches(host, "tiktok") and segs and segs[0] == "t"):
+        try:  # short share link: follow the redirect to the real profile or video link
+            r = http_get(raw if raw.startswith("http") else "https://" + raw, allow_redirects=True, timeout=10,
+                         headers={"User-Agent": random.choice(USER_AGENTS)})
+            host, segs, _ = parse_link(r.url)
+        except Exception:
+            return None
+    if not host_matches(host, "tiktok") or not segs:
+        return None
+    first = segs[0]
+    if first.startswith("@"):
+        return first[1:] or None
     return None
 
 
@@ -833,13 +983,22 @@ def scrape_tiktok(username, verification_code=None):
 
 # ==================== TELEGRAM ====================
 def extract_tg(url_or_at):
-    m = re.search(r"t\.me/([A-Za-z0-9_]+)", url_or_at)
-    if m: return m.group(1)
-    m = re.search(r"^@?([A-Za-z0-9_]+)$", url_or_at)
-    if m: return m.group(1)
-    m = re.search(r"^(-100\d+)$", url_or_at)
-    if m: return m.group(1)
-    return None
+    raw = (url_or_at or "").strip()
+    m = re.match(r"^@?([A-Za-z][A-Za-z0-9_]{3,31})$", raw)
+    if m:
+        return m.group(1)
+    m = re.match(r"^(-100\d+)$", raw)
+    if m:
+        return m.group(1)
+    host, segs, _ = parse_link(raw)
+    if not host_matches(host, "telegram") or not segs:
+        return None
+    if segs[0] == "s" and len(segs) > 1:  # t.me/s/channel (web preview)
+        segs = segs[1:]
+    first = segs[0].lstrip("@")
+    if first.startswith("+") or first.lower() in {"joinchat", "c", "addstickers", "share", "iv"}:
+        return None  # private invite or message link, cannot be looked up
+    return first if re.match(r"^[A-Za-z][A-Za-z0-9_]{3,31}$", first) else None
 
 
 async def _tg_async(username, verification_code=None):
@@ -921,27 +1080,36 @@ def scrape_telegram(username, verification_code=None):
 
 
 # ==================== FACEBOOK ====================
+FB_RESERVED = {"watch", "marketplace", "sharer", "sharer.php", "share", "login", "events", "gaming", "reel", "stories", "photo", "photos", "story.php", "permalink.php", "hashtag", "help", "policies"}
+
+
 def extract_fb(url_or_at):
-    if re.search(r"facebook\.com/profile\.php", url_or_at, re.I):
-        return None, "profile"
-    if re.search(r"facebook\.com/people/", url_or_at, re.I):
-        return None, "profile"
-
-    m = re.search(r"facebook\.com/groups/(\d+)", url_or_at, re.I)
-    if m: return m.group(1), "group"
-    m = re.search(r"facebook\.com/groups/([A-Za-z0-9.\-_]+)", url_or_at, re.I)
-    if m: return m.group(1), "group"
-
-    m = re.search(r"(?:facebook\.com|fb\.com)/([A-Za-z0-9.\-_]+)", url_or_at, re.I)
+    """Returns (identifier, type) where type is page | group | profile."""
+    raw = (url_or_at or "").strip()
+    m = re.match(r"^@?([A-Za-z0-9.\-_]{3,})$", raw)
     if m:
-        ident = m.group(1)
-        if ident.lower() not in {"profile.php", "watch", "marketplace", "groups", "sharer", "pages", "people"}:
-            return ident, "page"
-
-    m = re.search(r"^@?([A-Za-z0-9.\-_]+)$", url_or_at)
-    if m: return m.group(1), "page"
-
-    return None, None
+        return m.group(1), "page"
+    host, segs, q = parse_link(raw)
+    if not host_matches(host, "facebook"):
+        return None, None
+    if not segs:
+        return None, None
+    first = segs[0]
+    if first == "profile.php":
+        return (q.get("id"), "page") if q.get("id") else (None, "profile")  # pages without a username use ?id=
+    if first == "people" and len(segs) > 2:
+        return segs[2], "page"  # /people/Name/<numeric id>
+    if first == "people":
+        return None, "profile"
+    if first == "groups" and len(segs) > 1:
+        return segs[1], "group"
+    if first == "pages" and len(segs) > 1:
+        return (segs[2] if len(segs) > 2 else segs[1]), "page"  # /pages/Name/12345 -> numeric id
+    if first == "p" and len(segs) > 1:
+        return segs[1], "page"
+    if first.lower() in FB_RESERVED:
+        return None, None
+    return first, "page"
 
 
 def scrape_facebook(identifier, entity_type="page", verification_code=None):
@@ -1157,45 +1325,58 @@ def index():
 @app.route("/api/scrape", methods=["POST"])
 def universal_scrape():
     payload = request.get_json(silent=True) or {}
-    url = payload.get("url", "").strip()
+    url = (payload.get("url") or "").strip()
     verification_code = payload.get("verificationCode", "")
+    hint = (payload.get("platform") or "").lower()
 
     if not url:
         return jsonify({"success": False, "error": "Missing url"}), 400
 
-    if "youtube.com" in url or "youtu.be" in url:
+    platform = detect_platform(url) or (hint if hint in PLATFORM_HOSTS else None)
+    if not platform and url.startswith("@"):
+        platform = None  # unknown platform handle: try all below
+    elif not platform and re.match(r"^[A-Za-z0-9_.]+$", url):
+        platform = hint if hint in PLATFORM_HOSTS else None
+
+    if platform == "youtube":
         if not YOUTUBE_API_KEY:
             return jsonify({"success": False, "error": "YouTube API key missing"}), 500
-        cid, typ = extract_yt(url)
-        if not cid: return jsonify({"success": False, "error": "Invalid YouTube URL"}), 400
-        return jsonify(yt_by_id(cid, verification_code) if typ == "id" else yt_by_handle(cid, verification_code))
+        val, typ = extract_yt(url)
+        if not val:
+            return jsonify({"success": False, "error": "Invalid YouTube link. Use a channel link such as youtube.com/@name or youtube.com/channel/UC..."}), 400
+        return jsonify(with_retry(lambda: yt_lookup(val, typ, verification_code)))
 
-    if "twitter.com" in url or "x.com" in url:
+    if platform == "twitter":
         user = extract_tw(url)
-        if not user: return jsonify({"success": False, "error": "Invalid Twitter handle"}), 400
-        return jsonify(scrape_twitter(user, verification_code))
+        if not user:
+            return jsonify({"success": False, "error": "Invalid X/Twitter link. Use x.com/username"}), 400
+        return jsonify(with_retry(lambda: scrape_twitter(user, verification_code), attempts=3))
 
-    if "instagram.com" in url:
+    if platform == "instagram":
         user = extract_ig(url)
-        if not user: return jsonify({"success": False, "error": "Invalid Instagram handle"}), 400
-        return jsonify(scrape_instagram(user, verification_code))
+        if not user:
+            return jsonify({"success": False, "error": "Invalid Instagram link. Use instagram.com/username"}), 400
+        return jsonify(with_retry(lambda: scrape_instagram(user, verification_code), attempts=3))
 
-    if "tiktok.com" in url:
+    if platform == "tiktok":
         user = extract_tt(url)
-        if not user: return jsonify({"success": False, "error": "Invalid TikTok handle"}), 400
-        return jsonify(scrape_tiktok(user, verification_code))
+        if not user:
+            return jsonify({"success": False, "error": "Invalid TikTok link. Use tiktok.com/@username"}), 400
+        return jsonify(with_retry(lambda: scrape_tiktok(user, verification_code)))
 
-    if "t.me" in url or "telegram.me" in url:
+    if platform == "telegram":
         user = extract_tg(url)
-        if not user: return jsonify({"success": False, "error": "Invalid Telegram handle"}), 400
-        return jsonify(scrape_telegram(user, verification_code))
+        if not user:
+            return jsonify({"success": False, "error": "Invalid Telegram link. Use t.me/username (private invite links cannot be checked)"}), 400
+        return jsonify(with_retry(lambda: scrape_telegram(user, verification_code)))
 
-    if "facebook.com" in url or "fb.com" in url:
+    if platform == "facebook":
         ident, etype = extract_fb(url)
         if etype == "profile":
-            return jsonify({"success": False, "error": "Personal Facebook profiles cannot be scraped. Only Pages and Groups!"}), 400
-        if not ident: return jsonify({"success": False, "error": "Invalid Facebook URL"}), 400
-        return jsonify(scrape_facebook(ident, etype, verification_code))
+            return jsonify({"success": False, "error": "Personal Facebook profiles are not supported, only Pages and Groups"}), 400
+        if not ident:
+            return jsonify({"success": False, "error": "Invalid Facebook link"}), 400
+        return jsonify(with_retry(lambda: scrape_facebook(ident, etype, verification_code)))
 
     if url.startswith("@"):
         user = url.lstrip("@")
@@ -1210,7 +1391,7 @@ def universal_scrape():
             if res.get("success"):
                 return jsonify(res)
 
-    return jsonify({"success": False, "error": "Unsupported platform or invalid URL"}), 400
+    return jsonify({"success": False, "error": "Unsupported platform or invalid link"}), 400
 
 
 # Platform-specific endpoints
@@ -1219,9 +1400,9 @@ def youtube_endpoint():
     payload = request.get_json() or {}
     url = payload.get("url", "")
     verification_code = payload.get("verificationCode", "")
-    cid, typ = extract_yt(url)
-    if not cid: return jsonify({"success": False, "error": "Bad YouTube URL"}), 400
-    return jsonify(yt_by_id(cid, verification_code) if typ == "id" else yt_by_handle(cid, verification_code))
+    val, typ = extract_yt(url)
+    if not val: return jsonify({"success": False, "error": "Bad YouTube URL"}), 400
+    return jsonify(yt_lookup(val, typ, verification_code))
 
 @app.route("/api/twitter", methods=["POST"])
 def twitter_endpoint():
@@ -1284,7 +1465,7 @@ def health():
 def info():
     return jsonify({
         "message": "Social Media Stats API",
-        "version": "28.0 - FXTWITTER + IG META + MANUAL FALLBACK",
+        "version": "29.0 - FLEXIBLE LINKS + RETRIES",
         "endpoints": {
             "/": "GET – UI",
             "/api/scrape": "POST – universal",
